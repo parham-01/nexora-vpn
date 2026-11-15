@@ -9,9 +9,6 @@
 ### 🦊 𝗩𝗣𝗡 𝗳𝗼𝗿 𝗙𝗶𝗿𝗲𝗳𝗼𝘅
 
 <img src="https://img.shields.io/badge/Android-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android">
-<img src="https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="macOS">
-<img src="https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux">
-<img src="https://img.shields.io/badge/Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Windows">
 
 </div>
 
@@ -43,9 +40,6 @@
 | پلتفرم | توضیح |
 | :-- | :-- |
 | 📱 **Android** | فایل APK را نصب کنید — اتصال به‌صورت تونل کامل |
-| 🍎 **macOS** | فایل zip را باز کنید؛ بار اول: راست‌کلیک ← Open — اتصال با پروکسی سیستم یا فقط پروکسی |
-| 🐧 **Linux** | فایل tar.gz را باز کنید و `nexora_vpn` را اجرا کنید — اتصال با پروکسی سیستم یا فقط پروکسی |
-| 🖥️ **Windows** | فایل zip را Extract کنید و اجرا کنید — اتصال به‌صورت تونل کامل |
 
 ## 📥 دانلود
 
