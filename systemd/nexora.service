@@ -1,0 +1,18 @@
+[Unit]
+Description=Nexora VPN Linux Background Service
+Documentation=https://github.com/amirhossein-moloki/nexora-vpn
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+ExecStart=/usr/local/bin/nexora connect
+ExecStop=/usr/local/bin/nexora disconnect
+ExecReload=/usr/local/bin/nexora reconnect
+PIDFile=%t/nexora/vpn.pid
+Restart=on-failure
+RestartSec=5s
+KillMode=process
+
+[Install]
+WantedBy=default.target

@@ -92,12 +92,181 @@
 
 ## 💻 خروجی‌ها و پلتفرم‌ها
 
-| پلتفرم | فایل نصبی | معماری |
+| پلتفرم | فایل نصبی / دستور | معماری |
 | :--- | :--- | :--- |
+| 🐧 **لینوکس CLI (اختصاصی)** | `nexora` (خط فرمان مستقل و کامل) | x86_64 / arm64 (تمام توزیع‌های لینوکس، سرورها و SSH) |
 | 🪟 **ویندوز** | `Nexora-Setup-x64.exe` / Portable ZIP | x86_64 (Windows 10/11) |
 | 🤖 **اندروید** | `Nexora-universal.apk` / `arm64-v8a.apk` | تمام گوشی‌ها (اندروید 7 تا 15) |
-| 🐧 **لینوکس** | `Nexora-linux-x64.tar.gz` | Ubuntu, Debian, Fedora, Arch |
 | 🍏 **مک‌او‌اس** | `Nexora-macOS.dmg` | Intel & Apple Silicon (M1/M2/M3) |
+
+---
+
+## 🐧 راهنمای جامع نسخه خط فرمان لینوکس (Nexora Linux CLI)
+
+نسخه خط فرمان لینوکس (`nexora`) یک ابزار مستقل، سریع و بدون نیاز به محیط گرافیکی (Headless / SSH) است که تمامی امکانات اتصال، مدیریت سرورها، امنیت و هسته Firefox را در ترمینال فراهم می‌کند.
+
+### 📌 پیش‌نیازهای لینوکس
+
+1. **پایتون:** نسخه 3.8 به بالا (به‌صورت پیش‌فرض روی تمام توزیع‌ها نصب است).
+2. **هسته اتصال (VPN Core):** یکی از هسته‌های `xray` یا `v2ray`:
+   - آرچ / CachyOS: `sudo pacman -S v2ray`
+   - اوبونتو / دبیان: `sudo apt install v2ray` یا دانلود باینری Xray
+3. **ذخیره‌سازی امن:** پشتیبانی از `secret-tool` (Secret Service)؛ در محیط‌های بدون دسکتاپ به‌صورت خودکار از فایل امن با مجوز `0600` استفاده می‌شود.
+
+---
+
+### 🚀 نصب و راه‌اندازی (Build & Install)
+
+#### ۱. ساخت و اعتبارسنجی
+```bash
+./scripts/build.sh
+```
+
+#### ۲. نصب برنامه
+برای نصب در سطح کاربر (`~/.local/bin/nexora` بدون نیاز به دسترسی root):
+```bash
+./scripts/install.sh
+```
+برای نصب سیستمی برای تمام کاربران:
+```bash
+sudo ./scripts/install.sh
+```
+
+پس از نصب، دستور `nexora` از هر کجای ترمینال در دسترس است.
+
+#### ۳. اجرای تست‌های خودکار
+```bash
+python3 tests/run_tests.py
+```
+
+---
+
+### 📖 راهنمای دستورات خط فرمان `nexora`
+
+#### ۱. دستورات پایه و راهنما
+```bash
+nexora              # نمایش وضعیت خلاصه و کلی
+nexora help         # نمایش راهنمای کامل دستورات
+nexora version      # نمایش نسخه برنامه
+```
+
+#### ۲. مدیریت حساب و ورود (Account & Authentication)
+اطلاعات ورود به صورت امن ذخیره شده و رمز عبور هنگام تایپ نمایش داده نمی‌شود:
+```bash
+nexora login        # ورود به حساب (ایمیل و پسورد محرمانه)
+nexora logout       # خروج از حساب و پاکسازی امن توکن‌ها
+nexora account      # نمایش مشخصات حساب، شناسه دستگاه و وضعیت اعتبار توکن
+```
+
+#### ۳. مدیریت سرورها (Servers)
+```bash
+nexora servers                       # نمایش تمام سرورهای فعال همراه پرچم و پروتکل
+nexora servers --country germany     # فیلتر سرورهای کشور آلمان
+nexora servers --country france      # فیلتر سرورهای فرانسه
+nexora servers --json                # خروجی در قالب JSON مناسب اسکریپت‌ها
+```
+
+#### ۴. اتصال و قطع اتصال (VPN Connection)
+اتصال در پس‌زمینه (Daemon) اجرا شده و با بسته شدن ترمینال قطع نمی‌شود:
+```bash
+nexora connect                       # اتصال به بهترین سرور یا آخرین سرور استفاده‌شده
+nexora connect --server germany      # اتصال مستقیم به سرور آلمان
+nexora connect --server france       # اتصال مستقیم به سرور فرانسه
+nexora disconnect                    # قطع اتصال و بازنشانی تنظیمات شبکه
+nexora reconnect                     # اتصال مجدد به سرور فعال
+```
+
+#### ۵. وضعیت، آی‌پی و لاگ‌ها (Status & Diagnostics)
+```bash
+nexora status       # نمایش وضعیت کامل تونل، سرور متصل، آی‌پی، آپ‌تایم و وضعیت DNS
+nexora ip           # استعلام آی‌پی عمومی، لوکیشن، شهر و شرکت ارائه‌دهنده
+nexora ping         # تست تأخیر (پینگ) سرورها و نمایش نتایج
+nexora logs         # مشاهده آخرین لاگ‌های فنی هسته بدون اطلاعات حساس
+nexora logs -n 50   # نمایش ۵۰ خط آخر لاگ‌ها
+```
+
+#### ۶. تنظیمات برنامه (Configuration)
+تنظیمات استاندارد در مسیر `~/.config/nexora/config.json` ذخیره می‌شوند:
+```bash
+nexora config show                   # مشاهده تمام تنظیمات
+nexora config reset                  # بازنشانی تنظیمات به مقادیر اولیه کارخانه
+nexora config set routing_mode global # تغییر حالت روتینگ (global / bypass_lan_iran)
+nexora config set block_ads false    # فعال یا غیرفعال‌سازی مسدودساز تبلیغات
+```
+
+#### ۷. ماژول اختصاصی فایرفاکس (Firefox VPN)
+مدیریت کامل هسته و حساب‌های Mozilla/Firefox:
+```bash
+nexora firefox status                # بررسی وضعیت هسته فایرفاکس و سهمیه حساب‌ها
+nexora firefox login                 # ورود به حساب موزیلا همراه با پشتیبانی از کد تأیید دومرحله‌ای
+nexora firefox logout                # خروج و حذف حساب فایرفاکس
+nexora firefox servers               # مشاهده لیست سرورهای فایرفاکس در سراسر جهان
+nexora firefox connect               # اتصال به سرور پیشنهادی فایرفاکس
+nexora firefox connect --server de   # اتصال به سرور فایرفاکس آلمان
+nexora firefox disconnect            # قطع اتصال فایرفاکس
+```
+
+---
+
+### 🤖 خروجی ماشین‌خوان (JSON Mode)
+
+تمام دستورات اصلی از فلگ `--json` پشتیبانی می‌کنند. در این حالت، فقط و فقط JSON استاندارد در `stdout` چاپ شده و پیام‌های متنی جانبی به `stderr` ارسال می‌شوند:
+
+```bash
+nexora status --json
+nexora servers --country germany --json
+nexora ip --json
+nexora account --json
+```
+
+نمونه استفاده در Bash با `jq`:
+```bash
+IP=$(nexora ip --json | jq -r '.ip')
+echo "Current VPN IP is: $IP"
+```
+
+---
+
+### ⚙️ سرویس پس‌زمینه (systemd Service)
+
+برای اجرای خودکار Nexora هنگام روشن شدن سیستم یا مدیریت تحت عنوان systemd:
+```bash
+# فعال‌سازی سرویس کاربری
+systemctl --user enable nexora.service
+
+# شروع سرویس
+systemctl --user start nexora.service
+
+# بررسی وضعیت
+systemctl --user status nexora.service
+```
+
+---
+
+### 🛡️ امنیت و کدهای خروجی (Exit Codes)
+
+در اسکریپت‌ها و اتوماسیون می‌توانید از کدهای خروجی استاندارد زیر استفاده کنید:
+- `0`: موفقیت‌آمیز (Success)
+- `1`: خطای عمومی (General Error)
+- `2`: ورودی یا آرگومان نامعتبر (Invalid Input)
+- `3`: احراز هویت ناموفق (Auth Failed)
+- `4`: خطای اتصال یا شبکه (Connection Error)
+- `5`: دسترسی ناکافی (Insufficient Privileges)
+- `6`: سرویس یا سرور در دسترس نیست (Service/Server Unavailable)
+
+---
+
+### 🗑️ حذف برنامه (Uninstall)
+
+```bash
+# حذف استاندارد با حفظ تنظیمات شخصی
+./scripts/uninstall.sh
+
+# حذف کامل همراه با پاکسازی تمام تنظیمات و لاگ‌ها
+./scripts/uninstall.sh --purge
+```
+
+---
 
 ---
 
