@@ -1,0 +1,677 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      sb_url:
+        description: Supabase Project URL
+        required: true
+        default: 'https://YOUR-PROJECT.supabase.co'
+      sb_key:
+        description: Supabase anon/publishable key
+        required: false
+        default: ''
+      android:
+        description: Build Android APK
+        type: boolean
+        default: true
+      windows:
+        description: Build Windows
+        type: boolean
+        default: true
+      linux:
+        description: Build Linux (amd64)
+        type: boolean
+        default: true
+      linux_arm64:
+        description: Build Linux arm64 (needs a public repository)
+        type: boolean
+        default: true
+      macos:
+        description: Build macOS (universal; macOS runner = 10x minutes, keep off unless needed)
+        type: boolean
+        default: false
+      aab:
+        description: Also build Google Play AAB (extra ~10 min)
+        type: boolean
+        default: false
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    if: ${{ inputs.android }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: write
+    env:
+      SB_URL: ${{ inputs.sb_url }}
+      SB_KEY: ${{ inputs.sb_key }}
+      TUNNEL_DOMAIN: ${{ vars.TUNNEL_DOMAIN }}
+      TUNNEL_PUBKEY: ${{ vars.TUNNEL_PUBKEY }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Unpack project bundle (if the repo was pushed as one bundle)
+        shell: bash
+        run: |
+          if [ -f nexora-src.zip ]; then
+            python3 - <<'PY'
+          import zipfile, os
+          z = zipfile.ZipFile('nexora-src.zip')
+          z.extractall('.')
+          for i in z.infolist():
+              if i.filename.endswith('.sh') and os.path.exists(i.filename):
+                  os.chmod(i.filename, 0o755)
+          print('unpacked', len(z.namelist()), 'files from nexora-src.zip')
+          PY
+          else
+            echo "no bundle, using files as pushed"
+          fi
+      - name: Unpack Firefox core sources
+        shell: bash
+        run: tar -xzf client/third_party/nexora-core.tar.gz -C client/third_party
+      - name: Download world map data (digital globe)
+        shell: bash
+        run: |
+          mkdir -p client/assets/geo
+          curl -fsSL --retry 3 --max-time 60 -o client/assets/geo/countries-110m.json https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json || { rm -f client/assets/geo/countries-110m.json; echo "::warning::world map download failed; the app will download it at runtime"; }
+          ls -la client/assets/geo
+      - name: Free memory and disk (fixes exit code 143)
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/.ghcup /usr/local/share/powershell /opt/az /usr/local/lib/heroku /usr/lib/google-cloud-sdk /usr/share/miniconda /opt/microsoft 2>/dev/null || true
+          sudo swapoff -a 2>/dev/null || true
+          sudo fallocate -l 6G /mnt/swapfile 2>/dev/null && sudo chmod 600 /mnt/swapfile && sudo mkswap /mnt/swapfile >/dev/null && sudo swapon /mnt/swapfile || true
+          free -h
+          df -h /
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: client/third_party/nexora-core/core/go.mod
+          cache-dependency-path: client/third_party/nexora-core/core/go.sum
+      - name: Install Android NDK and gomobile
+        shell: bash
+        env:
+          GOMOBILE_VERSION: v0.0.0-20260908204917-8b95e45f8d3e
+        run: |
+          set -euo pipefail
+          NDK_VERSION=30.0.16248370
+          set +e
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" >/tmp/ndk.log 2>&1
+          set -e
+          if [ ! -d "$ANDROID_HOME/ndk/$NDK_VERSION" ]; then
+            tail -5 /tmp/ndk.log || true
+            NDK_VERSION="$(ls "$ANDROID_HOME/ndk" | sort -V | tail -1)"
+            echo "Using preinstalled NDK $NDK_VERSION"
+          fi
+          echo "NDK_VERSION=$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          go install "golang.org/x/mobile/cmd/gomobile@$GOMOBILE_VERSION" "golang.org/x/mobile/cmd/gobind@$GOMOBILE_VERSION"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
+          "$(go env GOPATH)/bin/gomobile" init || echo "gomobile init skipped (not required by this gomobile version)"
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('client/pubspec.yaml', 'admin/pubspec.yaml', 'tools/patch_android.py') }}
+          restore-keys: gradle-${{ runner.os }}-
+      - name: Signing key (Google Play upload key)
+        shell: bash
+        env:
+          SECRET_KS: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          SECRET_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SECRET_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          mkdir -p keystore
+          if [ -n "${SECRET_KS:-}" ] && [ -n "${SECRET_PASS:-}" ]; then
+            echo "$SECRET_KS" | base64 -d > keystore/upload.jks
+            echo "KS_PASS=$SECRET_PASS" >> "$GITHUB_ENV"
+            echo "KS_ALIAS=${SECRET_ALIAS:-nexora}" >> "$GITHUB_ENV"
+            echo "Using keystore from repository secrets"
+          else
+            PASS="$(openssl rand -hex 16)"
+            keytool -genkeypair -keystore keystore/upload.jks -storetype JKS \
+              -alias nexora -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$PASS" -keypass "$PASS" -dname "CN=Nexora VPN"
+            echo "KS_PASS=$PASS" >> "$GITHUB_ENV"
+            echo "KS_ALIAS=nexora" >> "$GITHUB_ENV"
+            echo "::warning::No signing secrets set. Using a temporary key: updates over an older install will not work. Set ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_ALIAS."
+          fi
+          keytool -list -v -keystore keystore/upload.jks -storepass "$(grep -h '^KS_PASS=' "$GITHUB_ENV" | tail -1 | cut -d= -f2-)" | grep -E "Alias name|SHA1|SHA256" || true
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          export KEYSTORE_PATH="$PWD/keystore/upload.jks"
+          export KEYSTORE_PASSWORD="$KS_PASS"
+          export KEY_PASSWORD="$KS_PASS"
+          export KEY_ALIAS="$KS_ALIAS"
+          BN="${{ github.run_number }}"
+          DEFS="--dart-define=SB_URL=$SB_URL --dart-define=SB_KEY=$SB_KEY --dart-define=TUNNEL_DOMAIN=${TUNNEL_DOMAIN:-} --dart-define=TUNNEL_PUBKEY=${TUNNEL_PUBKEY:-} --dart-define=UPDATE_REPO=${{ github.repository }}"
+          stopg() { pkill -f 'GradleDaemon|KotlinCompileDaemon' || true; sleep 2; free -h || true; }
+          pip install pillow --quiet || pip install --break-system-packages pillow --quiet
+          bash tools/scaffold.sh client android
+          python3 tools/patch_android.py client "NEXORA VPN"
+          python3 tools/prepare_firefox_android.py client
+          python3 tools/prepare_updater_android.py client
+          mkdir -p client/android/app/libs
+          LIBV2RAY_TAG="v26.10.17"
+          LIBV2RAY_SHA="$(git ls-remote https://github.com/2dust/AndroidLibXrayLite "refs/tags/${LIBV2RAY_TAG}" "refs/tags/${LIBV2RAY_TAG}^{}" | sort -k2 | tail -1 | cut -f1)"
+          if [ -z "$LIBV2RAY_SHA" ]; then echo "::error::libv2ray tag ${LIBV2RAY_TAG} not found"; exit 1; fi
+          rm -rf combined && mkdir combined
+          CORE_DIR="$PWD/client/third_party/nexora-core/core"
+          (
+            cd combined
+            cat > go.mod <<EOF2
+          module nexora/combined
+
+          go 1.27.2
+          EOF2
+            sed -i 's/^          //' go.mod
+            cat > tools.go <<'EOF2'
+          package combined
+
+          import (
+          	_ "github.com/2dust/AndroidLibXrayLite"
+          	_ "nexora.app/vpn-client/core/mobile"
+          	_ "golang.org/x/mobile/bind"
+          )
+          EOF2
+            sed -i 's/^          //' tools.go
+            go mod edit -require=nexora.app/vpn-client/core@v0.0.0 -replace=nexora.app/vpn-client/core="$CORE_DIR"
+            go get "github.com/2dust/AndroidLibXrayLite@${LIBV2RAY_SHA}"
+            go get golang.org/x/mobile/bind@latest
+            go mod tidy
+            gomobile bind -v -target=android -androidapi 24 -trimpath -ldflags="-s -w -buildid= -checklinkname=0" -o "$OLDPWD/client/android/app/libs/core.aar" nexora.app/vpn-client/core/mobile github.com/2dust/AndroidLibXrayLite
+          )
+          unzip -l client/android/app/libs/core.aar | grep -E "libv2ray/|go/Seq.class|libgojni.so" | head
+          python3 tools/apply_icon.py client android
+          bash tools/add_font.sh client
+          bash tools/add_pixel_font.sh client
+          bash tools/scaffold.sh admin android
+          python3 tools/patch_android.py admin "NEXORA Admin"
+          bash tools/add_font.sh admin
+          (cd client && flutter pub get)
+          (cd admin && flutter pub get)
+          (cd client && flutter build apk --release --build-name="1.0.$BN" --build-number="$BN" --target-platform "android-arm,android-arm64,android-x64" $DEFS)
+          cp client/build/app/outputs/flutter-apk/app-release.apk "out/NEXORA-VPN-Android-universal.apk"
+          stopg
+          (cd client && flutter build apk --release --split-per-abi --build-name="1.0.$BN" --build-number="$BN" --target-platform "android-arm,android-arm64,android-x64" $DEFS)
+          cp client/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk "out/NEXORA-VPN-Android-arm64-v8a.apk"
+          cp client/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk "out/NEXORA-VPN-Android-armeabi-v7a.apk"
+          cp client/build/app/outputs/flutter-apk/app-x86_64-release.apk "out/NEXORA-VPN-Android-x86_64.apk"
+          rm -rf client/build client/android/.gradle client/android/app/.cxx
+          stopg
+          df -h /
+          (cd admin && flutter build apk --release --build-number="$BN" --target-platform "android-arm,android-arm64,android-x64" $DEFS)
+          cp admin/build/app/outputs/flutter-apk/app-release.apk "out/NEXORA-Admin-Android-universal.apk"
+          rm -rf admin/build admin/android/.gradle admin/android/app/.cxx
+          stopg
+          df -h /
+          if [ "${{ inputs.aab }}" = "true" ]; then
+            (cd client && flutter build appbundle --release --build-name="1.0.$BN" --build-number="$BN" $DEFS)
+            cp client/build/app/outputs/bundle/release/app-release.aab out/NEXORA-VPN-GooglePlay.aab
+          fi
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: android
+          path: |
+            out/*.apk
+            out/*.aab
+          retention-days: 1
+          if-no-files-found: error
+      - name: Publish GitHub Release (in-app updater)
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          TAG="v1.0.${{ github.run_number }}"
+          gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1 || gh release create "$TAG" --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "NEXORA VPN $TAG" --notes "Automatic build $TAG" --latest || sleep 8
+          gh release upload "$TAG" out/NEXORA-VPN-Android-*.apk --repo "${{ github.repository }}" --clobber
+
+  windows:
+    if: ${{ inputs.windows }}
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      SB_URL: ${{ inputs.sb_url }}
+      SB_KEY: ${{ inputs.sb_key }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Unpack project bundle (if the repo was pushed as one bundle)
+        shell: bash
+        run: |
+          if [ -f nexora-src.zip ]; then
+            python3 - <<'PY'
+          import zipfile, os
+          z = zipfile.ZipFile('nexora-src.zip')
+          z.extractall('.')
+          for i in z.infolist():
+              if i.filename.endswith('.sh') and os.path.exists(i.filename):
+                  os.chmod(i.filename, 0o755)
+          print('unpacked', len(z.namelist()), 'files from nexora-src.zip')
+          PY
+          else
+            echo "no bundle, using files as pushed"
+          fi
+      - name: Unpack Firefox core sources
+        shell: bash
+        run: tar -xzf client/third_party/nexora-core.tar.gz -C client/third_party
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: client/third_party/nexora-core/core/go.mod
+          cache-dependency-path: client/third_party/nexora-core/core/go.sum
+      - name: Download world map data (digital globe)
+        shell: bash
+        run: |
+          mkdir -p client/assets/geo
+          curl -fsSL --retry 3 --max-time 60 -o client/assets/geo/countries-110m.json https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json || { rm -f client/assets/geo/countries-110m.json; echo "::warning::world map download failed; the app will download it at runtime"; }
+          ls -la client/assets/geo
+      - name: Build Firefox Windows core
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $destination = Join-Path $env:GITHUB_WORKSPACE 'firefox-core-build'
+          New-Item -ItemType Directory -Force $destination | Out-Null
+          Push-Location 'client/third_party/nexora-core/core'
+          try {
+            $env:APP_VERSION = '1.0.0'
+            go generate ./cmd/nexora-vpn-core
+            if ($LASTEXITCODE -ne 0) { throw 'go generate failed (Firefox core)' }
+            go generate ./cmd/nexora-vpn-tun
+            if ($LASTEXITCODE -ne 0) { throw 'go generate failed (Firefox TUN)' }
+            $flags = '-s -w -X nexora.app/vpn-client/core/internal/version.Current=1.0.0'
+            go build -trimpath -ldflags $flags -o (Join-Path $destination 'nexora-vpn-core.exe') ./cmd/nexora-vpn-core
+            if ($LASTEXITCODE -ne 0) { throw 'Go build failed (Firefox core)' }
+            go build -tags with_gvisor -trimpath -ldflags ($flags + ' -H windowsgui') -o (Join-Path $destination 'nexora-vpn-tun.exe') ./cmd/nexora-vpn-tun
+            if ($LASTEXITCODE -ne 0) { throw 'Go build failed (Firefox TUN service)' }
+          } finally {
+            Remove-Item Env:APP_VERSION -ErrorAction SilentlyContinue
+            Pop-Location
+          }
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-windows-64.zip
+          7z x xray.zip -oxray -y
+          pip install pillow --quiet
+          bash tools/scaffold.sh client windows
+          python3 tools/apply_icon.py client windows
+          sed -i '0,/^project(.*$/s//&\nadd_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS=1)/' client/windows/CMakeLists.txt
+          grep -n 'SILENCE_EXPERIMENTAL' client/windows/CMakeLists.txt
+          bash tools/add_font.sh client
+          bash tools/add_pixel_font.sh client
+          sed -i 's/L"parham_client"/L"NEXORA VPN"/' client/windows/runner/main.cpp
+          sed -i 's/Win32Window::Size size(1280, 720)/Win32Window::Size size(1120, 760)/' client/windows/runner/main.cpp
+          sed -i 's/Parham VPN/NEXORA VPN/g; s/parham_client/NEXORA VPN/g' client/windows/runner/Runner.rc || true
+          cp client/lib/vpn_android_stub.dart client/lib/vpn_android.dart
+          sed -i '/flutter_v2ray/d' client/pubspec.yaml
+          (cd client && flutter pub get && flutter build windows --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}" --dart-define=APP_VERSION="1.0.${{ github.run_number }}" --dart-define=SB_URL="$SB_URL" --dart-define=SB_KEY="$SB_KEY" --dart-define=UPDATE_REPO="${{ github.repository }}")
+          mkdir -p client/build/windows/x64/runner/Release/firefox-core
+          cp firefox-core-build/*.exe client/build/windows/x64/runner/Release/firefox-core/
+          mkdir -p stage/NEXORA-VPN-Windows
+          cp -r client/build/windows/x64/runner/Release/. stage/NEXORA-VPN-Windows/
+          mkdir -p stage/NEXORA-VPN-Windows/xray
+          cp -r xray/. stage/NEXORA-VPN-Windows/xray/
+      - name: Package Windows (installer and portable zip)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $ver = "1.0.${{ github.run_number }}"
+          choco install innosetup -y --no-progress
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { $iscc = Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe' }
+          $exe = (Get-ChildItem "stage\NEXORA-VPN-Windows" -Filter *.exe | Where-Object { $_.Name -notmatch 'nexora-vpn' } | Select-Object -First 1).Name
+          & $iscc "/DAppVer=$ver" "/DAppExe=$exe" "/DSrcDir=$PWD\stage\NEXORA-VPN-Windows" "/DOutDir=$PWD\out" tools\windows_installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          Compress-Archive -Path "stage\NEXORA-VPN-Windows" -DestinationPath "out\NEXORA-VPN-Windows-x64.zip" -CompressionLevel Optimal
+          Get-ChildItem out | Format-Table Name, Length
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: windows
+          path: out
+          retention-days: 1
+      - name: Attach to GitHub Release (in-app updater)
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v1.0.${{ github.run_number }}"
+          gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1 || gh release create "$TAG" --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "NEXORA VPN $TAG" --notes "Automatic build $TAG" --latest || sleep 8
+          gh release upload "$TAG" out/* --repo "${{ github.repository }}" --clobber
+
+  linux:
+    if: ${{ inputs.linux }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SB_URL: ${{ inputs.sb_url }}
+      SB_KEY: ${{ inputs.sb_key }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Unpack project bundle (if the repo was pushed as one bundle)
+        shell: bash
+        run: |
+          if [ -f nexora-src.zip ]; then
+            python3 - <<'PY'
+          import zipfile, os
+          z = zipfile.ZipFile('nexora-src.zip')
+          z.extractall('.')
+          for i in z.infolist():
+              if i.filename.endswith('.sh') and os.path.exists(i.filename):
+                  os.chmod(i.filename, 0o755)
+          print('unpacked', len(z.namelist()), 'files from nexora-src.zip')
+          PY
+          else
+            echo "no bundle, using files as pushed"
+          fi
+      - name: Unpack Nexora core sources
+        shell: bash
+        run: tar -xzf client/third_party/nexora-core.tar.gz -C client/third_party
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: client/third_party/nexora-core/core/go.mod
+          cache-dependency-path: client/third_party/nexora-core/core/go.sum
+      - name: Download world map data (digital globe)
+        shell: bash
+        run: |
+          mkdir -p client/assets/geo
+          curl -fsSL --retry 3 --max-time 60 -o client/assets/geo/countries-110m.json https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json || { rm -f client/assets/geo/countries-110m.json; echo "::warning::world map download failed; the app will download it at runtime"; }
+          ls -la client/assets/geo
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev unzip
+      - name: Build Nexora core (Linux)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p firefox-core-build
+          cd client/third_party/nexora-core/core
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X nexora.app/vpn-client/core/internal/version.Current=1.0.0" -o "$GITHUB_WORKSPACE/firefox-core-build/nexora-vpn-core" ./cmd/nexora-vpn-core
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          curl -fsSL -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          mkdir -p xray && unzip -q -o xray.zip -d xray && chmod +x xray/xray
+          pip install pillow --quiet || pip install --break-system-packages pillow --quiet
+          bash tools/scaffold.sh client linux
+          bash tools/add_font.sh client
+          bash tools/add_pixel_font.sh client
+          sed -i 's/set(BINARY_NAME ".*")/set(BINARY_NAME "nexora_vpn")/' client/linux/CMakeLists.txt
+          sed -i 's/"parham_client"/"NEXORA VPN"/g' client/linux/runner/my_application.cc || true
+          cp client/lib/vpn_android_stub.dart client/lib/vpn_android.dart
+          sed -i '/flutter_v2ray/d' client/pubspec.yaml
+          (cd client && flutter pub get && flutter build linux --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}" --dart-define=APP_VERSION="1.0.${{ github.run_number }}" --dart-define=SB_URL="$SB_URL" --dart-define=SB_KEY="$SB_KEY" --dart-define=UPDATE_REPO="${{ github.repository }}")
+          B=client/build/linux/x64/release/bundle
+          mkdir -p "$B/firefox-core" "$B/xray"
+          cp firefox-core-build/nexora-vpn-core "$B/firefox-core/" && chmod +x "$B/firefox-core/nexora-vpn-core"
+          cp -r xray/. "$B/xray/"
+          cp tools/nexora_icon.png "$B/nexora_icon.png"
+          mkdir -p out/NexoraVPN-Linux
+          cp -r "$B"/. out/NexoraVPN-Linux/
+          tar -czf out/NEXORA-VPN-Linux-amd64.tar.gz -C out NexoraVPN-Linux
+          rm -rf out/NexoraVPN-Linux
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: linux
+          path: out
+          retention-days: 1
+      - name: Attach to GitHub Release (in-app updater)
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v1.0.${{ github.run_number }}"
+          gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1 || gh release create "$TAG" --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "NEXORA VPN $TAG" --notes "Automatic build $TAG" --latest || sleep 8
+          gh release upload "$TAG" out/* --repo "${{ github.repository }}" --clobber
+
+  linux_arm64:
+    if: ${{ inputs.linux && inputs.linux_arm64 }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    env:
+      SB_URL: ${{ inputs.sb_url }}
+      SB_KEY: ${{ inputs.sb_key }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Unpack project bundle (if the repo was pushed as one bundle)
+        shell: bash
+        run: |
+          if [ -f nexora-src.zip ]; then
+            python3 - <<'PY'
+          import zipfile, os
+          z = zipfile.ZipFile('nexora-src.zip')
+          z.extractall('.')
+          for i in z.infolist():
+              if i.filename.endswith('.sh') and os.path.exists(i.filename):
+                  os.chmod(i.filename, 0o755)
+          print('unpacked', len(z.namelist()), 'files from nexora-src.zip')
+          PY
+          else
+            echo "no bundle, using files as pushed"
+          fi
+      - name: Unpack Nexora core sources
+        shell: bash
+        run: tar -xzf client/third_party/nexora-core.tar.gz -C client/third_party
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          architecture: arm64
+          cache: true
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: client/third_party/nexora-core/core/go.mod
+          cache-dependency-path: client/third_party/nexora-core/core/go.sum
+      - name: Download world map data (digital globe)
+        shell: bash
+        run: |
+          mkdir -p client/assets/geo
+          curl -fsSL --retry 3 --max-time 60 -o client/assets/geo/countries-110m.json https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json || { rm -f client/assets/geo/countries-110m.json; echo "::warning::world map download failed; the app will download it at runtime"; }
+          ls -la client/assets/geo
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev unzip
+      - name: Build Nexora core (Linux)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p firefox-core-build
+          cd client/third_party/nexora-core/core
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X nexora.app/vpn-client/core/internal/version.Current=1.0.0" -o "$GITHUB_WORKSPACE/firefox-core-build/nexora-vpn-core" ./cmd/nexora-vpn-core
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          curl -fsSL -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip
+          mkdir -p xray && unzip -q -o xray.zip -d xray && chmod +x xray/xray
+          pip install pillow --quiet || pip install --break-system-packages pillow --quiet
+          bash tools/scaffold.sh client linux
+          bash tools/add_font.sh client
+          bash tools/add_pixel_font.sh client
+          sed -i 's/set(BINARY_NAME ".*")/set(BINARY_NAME "nexora_vpn")/' client/linux/CMakeLists.txt
+          sed -i 's/"parham_client"/"NEXORA VPN"/g' client/linux/runner/my_application.cc || true
+          cp client/lib/vpn_android_stub.dart client/lib/vpn_android.dart
+          sed -i '/flutter_v2ray/d' client/pubspec.yaml
+          (cd client && flutter pub get && flutter build linux --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}" --dart-define=APP_VERSION="1.0.${{ github.run_number }}" --dart-define=SB_URL="$SB_URL" --dart-define=SB_KEY="$SB_KEY" --dart-define=UPDATE_REPO="${{ github.repository }}")
+          B=client/build/linux/arm64/release/bundle
+          mkdir -p "$B/firefox-core" "$B/xray"
+          cp firefox-core-build/nexora-vpn-core "$B/firefox-core/" && chmod +x "$B/firefox-core/nexora-vpn-core"
+          cp -r xray/. "$B/xray/"
+          cp tools/nexora_icon.png "$B/nexora_icon.png"
+          mkdir -p out/NexoraVPN-Linux
+          cp -r "$B"/. out/NexoraVPN-Linux/
+          tar -czf out/NEXORA-VPN-Linux-arm64.tar.gz -C out NexoraVPN-Linux
+          rm -rf out/NexoraVPN-Linux
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: linux-arm64
+          path: out
+          retention-days: 1
+      - name: Attach to GitHub Release (in-app updater)
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v1.0.${{ github.run_number }}"
+          gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1 || gh release create "$TAG" --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "NEXORA VPN $TAG" --notes "Automatic build $TAG" --latest || sleep 8
+          gh release upload "$TAG" out/* --repo "${{ github.repository }}" --clobber
+
+  macos:
+    if: ${{ inputs.macos }}
+    permissions:
+      contents: write
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      SB_URL: ${{ inputs.sb_url }}
+      SB_KEY: ${{ inputs.sb_key }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Unpack project bundle (if the repo was pushed as one bundle)
+        shell: bash
+        run: |
+          if [ -f nexora-src.zip ]; then
+            python3 - <<'PY'
+          import zipfile, os
+          z = zipfile.ZipFile('nexora-src.zip')
+          z.extractall('.')
+          for i in z.infolist():
+              if i.filename.endswith('.sh') and os.path.exists(i.filename):
+                  os.chmod(i.filename, 0o755)
+          print('unpacked', len(z.namelist()), 'files from nexora-src.zip')
+          PY
+          else
+            echo "no bundle, using files as pushed"
+          fi
+      - name: Unpack Nexora core sources
+        shell: bash
+        run: tar -xzf client/third_party/nexora-core.tar.gz -C client/third_party
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: client/third_party/nexora-core/core/go.mod
+          cache-dependency-path: client/third_party/nexora-core/core/go.sum
+      - name: Download world map data (digital globe)
+        shell: bash
+        run: |
+          mkdir -p client/assets/geo
+          curl -fsSL --retry 3 --max-time 60 -o client/assets/geo/countries-110m.json https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json || { rm -f client/assets/geo/countries-110m.json; echo "::warning::world map download failed; the app will download it at runtime"; }
+          ls -la client/assets/geo
+      - name: Build Nexora core (macOS universal)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p firefox-core-build
+          cd client/third_party/nexora-core/core
+          FLAGS="-s -w -X nexora.app/vpn-client/core/internal/version.Current=1.0.0"
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "$FLAGS" -o "$GITHUB_WORKSPACE/firefox-core-build/core-arm64" ./cmd/nexora-vpn-core
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "$FLAGS" -o "$GITHUB_WORKSPACE/firefox-core-build/core-amd64" ./cmd/nexora-vpn-core
+          cd "$GITHUB_WORKSPACE/firefox-core-build"
+          lipo -create core-arm64 core-amd64 -output nexora-vpn-core
+          chmod +x nexora-vpn-core
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          X=https://github.com/XTLS/Xray-core/releases/latest/download
+          curl -fsSL -o xa.zip "$X/Xray-macos-arm64-v8a.zip"
+          curl -fsSL -o xi.zip "$X/Xray-macos-64.zip"
+          mkdir -p xa xi xray
+          unzip -q -o xa.zip -d xa && unzip -q -o xi.zip -d xi
+          lipo -create xa/xray xi/xray -output xray/xray
+          cp xa/*.dat xray/ 2>/dev/null || true
+          chmod +x xray/xray
+          pip3 install pillow --quiet || pip3 install --break-system-packages pillow --quiet
+          bash tools/scaffold.sh client macos
+          python3 tools/apply_icon.py client macos
+          bash tools/add_font.sh client
+          bash tools/add_pixel_font.sh client
+          sed -i '' 's/^PRODUCT_NAME = .*/PRODUCT_NAME = NEXORA VPN/' client/macos/Runner/Configs/AppInfo.xcconfig
+          for f in client/macos/Runner/DebugProfile.entitlements client/macos/Runner/Release.entitlements; do
+            /usr/libexec/PlistBuddy -c "Set :com.apple.security.app-sandbox false" "$f" || /usr/libexec/PlistBuddy -c "Add :com.apple.security.app-sandbox bool false" "$f"
+            /usr/libexec/PlistBuddy -c "Set :com.apple.security.network.client true" "$f" || /usr/libexec/PlistBuddy -c "Add :com.apple.security.network.client bool true" "$f" || true
+            /usr/libexec/PlistBuddy -c "Set :com.apple.security.network.server true" "$f" || /usr/libexec/PlistBuddy -c "Add :com.apple.security.network.server bool true" "$f" || true
+          done
+          cp client/lib/vpn_android_stub.dart client/lib/vpn_android.dart
+          sed -i '' '/flutter_v2ray/d' client/pubspec.yaml
+          (cd client && flutter pub get && flutter build macos --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}" --dart-define=APP_VERSION="1.0.${{ github.run_number }}" --dart-define=SB_URL="$SB_URL" --dart-define=SB_KEY="$SB_KEY" --dart-define=UPDATE_REPO="${{ github.repository }}")
+          APP="$(ls -d client/build/macos/Build/Products/Release/*.app | head -1)"
+          mkdir -p "$APP/Contents/MacOS/firefox-core" "$APP/Contents/MacOS/xray"
+          cp firefox-core-build/nexora-vpn-core "$APP/Contents/MacOS/firefox-core/"
+          cp -r xray/. "$APP/Contents/MacOS/xray/"
+          codesign --force --deep -s - "$APP"
+          rm -rf dmgstage && mkdir dmgstage
+          cp -R "$APP" dmgstage/
+          ln -s /Applications dmgstage/Applications
+          hdiutil create -volname "NEXORA VPN" -srcfolder dmgstage -ov -format UDZO out/NEXORA-VPN-macOS.dmg
+          tar -czf out/NEXORA-VPN-macOS.tar.gz -C "$(dirname "$APP")" "$(basename "$APP")"
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: macos
+          path: out
+          retention-days: 1
+      - name: Attach to GitHub Release (in-app updater)
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v1.0.${{ github.run_number }}"
+          gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1 || gh release create "$TAG" --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "NEXORA VPN $TAG" --notes "Automatic build $TAG" --latest || sleep 8
+          gh release upload "$TAG" out/* --repo "${{ github.repository }}" --clobber
