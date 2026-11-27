@@ -326,11 +326,11 @@ class _UpdatePageState extends State<UpdatePage> {
 
   String _friendly(Object e) {
     final t = '$e';
-    if (t.contains('release_not_found_token')) return 'ریلیزی در مخزن $kUpdateRepo پیدا نشد. توکن گیت‌هاب باید به همین مخزن دسترسی داشته باشد (Fine-grained: همین مخزن + Contents: Read-only، یا Classic با تیک repo). اگر ریلیزی منتشر نشده، اول بیلد بگیر.';
-    if (t.contains('bad_token')) return 'توکن گیت‌هاب نامعتبر است؛ در اپ ادمین توکن را اصلاح کن.';
-    if (t.contains('rate_limited')) return 'محدودیت درخواست GitHub پر شده؛ در اپ ادمین «توکن گیت‌هاب» را وارد کن یا کمی بعد تلاش کن.';
-    if (t.contains('forbidden')) return 'دسترسی به GitHub رد شد (403)؛ توکن گیت‌هاب را در اپ ادمین بررسی کن.';
-    if (t.contains('release_not_found')) return 'ریلیزی در مخزن GitHub پیدا نشد (مخزن خصوصی است یا هنوز ریلیزی منتشر نشده).';
+    if (t.contains('release_not_found_token')) return 'ریلیزی در مخزن $kUpdateRepo پیدا نشد؛ هنوز نسخه‌ای منتشر نشده یا مخزن در دسترس نیست.';
+    if (t.contains('bad_token')) return 'توکن گیت‌هاب نامعتبر است.';
+    if (t.contains('rate_limited')) return 'محدودیت درخواست GitHub پر شده؛ کمی بعد دوباره تلاش کن.';
+    if (t.contains('forbidden')) return 'دسترسی به GitHub رد شد (403)؛ کمی بعد دوباره تلاش کن.';
+    if (t.contains('release_not_found')) return 'ریلیزی در مخزن $kUpdateRepo پیدا نشد؛ هنوز نسخه‌ای منتشر نشده است.';
     if (e is SocketException || e is TimeoutException || t.contains('HandshakeException')) {
       return 'اتصال به GitHub برقرار نشد؛ اینترنت را بررسی کن.';
     }
@@ -438,7 +438,7 @@ class _UpdatePageState extends State<UpdatePage> {
           girl,
           const SizedBox(height: 18),
           _title('Up to date!', color: _cyan),
-          _fa14('برنامه به‌روز است${_info == null ? '' : ' (نسخه ${_fa(_info!.versionName)})'}'),
+          _fa14('شما در آخرین نسخه هستید${_info == null ? '' : ' (نسخه ${_fa(_info!.versionName)})'}'),
           const SizedBox(height: 20),
           _PixelButton(label: 'بررسی دوباره', onTap: _check),
         ];

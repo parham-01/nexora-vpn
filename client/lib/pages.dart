@@ -2,10 +2,12 @@ import 'intro_page.dart';
 import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/cupertino.dart' show CupertinoPageRoute;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'api.dart';
+import 'cloud_backup.dart';
 import 'aws_assistant.dart';
 import 'connect_fx.dart';
 import 'connect_globe.dart';
@@ -34,6 +36,9 @@ Route<T> adaptiveRoute<T>(WidgetBuilder b) =>
 bool _popupOpen = false;
 
 Future<void> showConnPopup(BuildContext context) async {
+  // پاپ‌آپ «شما متصل شدید» حذف شد؛ بعد از اتصال دیگر نمایش داده نمی‌شود.
+  return;
+  // ignore: dead_code
   if (_popupOpen || !context.mounted) return;
   _popupOpen = true;
   try {
@@ -265,6 +270,10 @@ Widget _rowQuality(String label, String value, P p, {Color? valColor}) => Row(
       ],
     );
 
+/// درخواست «انتخاب لوکیشن و اتصال» از صفحه‌ی کانفیگ‌ها (دکمه‌ی فلش کنار هر لوکیشن).
+/// صفحه‌ی کانفیگ‌ها لوکیشن را انتخاب می‌کند، به خانه برمی‌گردد و این شمارنده را زیاد می‌کند؛ خانه اتصال را برقرار می‌کند.
+final ValueNotifier<int> homeConnectRequest = ValueNotifier<int>(0);
+
 class Shell extends StatefulWidget {
   const Shell({super.key});
 
@@ -288,12 +297,24 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    homeConnectRequest.addListener(_onHomeConnectReq);
+    Tour.launch = (anim, buddy) async {
+      if (!mounted) return;
+      _go(0);
+      await showNexoraIntro(context, goTab: _go, anim: anim, buddy: buddy);
+    };
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
       if (Store.firstRun && !Store.introSeen) {
         await Future<void>.delayed(const Duration(milliseconds: 900));
         if (!mounted) return;
-        await showNexoraIntro(context, goTab: _go);
+        final c = await showIntroPicker(context, first: true);
+        if (!mounted) return;
+        if (c == null) {
+          await Store.setIntroSeen();
+        } else {
+          await showNexoraIntro(context, goTab: _go, anim: c.anim, buddy: c.buddy);
+        }
         if (!mounted) return;
       }
       await promptFinishedUpdate(context);
@@ -304,8 +325,12 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
     _boot();
   }
 
+  void _onHomeConnectReq() => _go(0);
+
   @override
   void dispose() {
+    homeConnectRequest.removeListener(_onHomeConnectReq);
+    Tour.launch = null;
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -318,13 +343,14 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
 
   Future<void> _boot() async {
     await VpnService.I.init();
-    // با ورود به برنامه یک تست پینگ پس‌زمینه انجام و کش می‌شود (اولین اتصال از همین نتایج استفاده می‌کند)
-    unawaited(Api.sync().then((_) => VpnService.I.startBackgroundPing()));
+    // تست پینگ پس‌زمینه‌ی شروع برنامه حذف شد؛ فقط لیست کانفیگ‌ها همگام می‌شود
+    unawaited(Api.sync());
     unawaited(GeoAtlas.preload());
     if (Store.getBool('autoConnect', false) && Store.config.value != null && mounted) {
       final r = await ConnectGlobe.run(context, VpnService.I.connect, _errText);
       if (!mounted) return;
       if (r != null) {
+        _logConnFail('خانه / اتصال خودکار هنگام باز شدن برنامه', r);
         snack(context, _errText(r));
       } else {
         showConnPopup(context);
@@ -338,8 +364,8 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
     final wide = MediaQuery.sizeOf(context).width >= 800;
     // صفحه‌های پنهان انیمیشن‌شان متوقف می‌شود (TickerMode) تا گوشی فقط صفحه‌ی دیده‌شده را بکشد
     final pages = IndexedStack(index: _i, children: [
-      TickerMode(enabled: _i == 0, child: HomePage(openSettings: () => _go(1))),
-      _seen.contains(1) ? TickerMode(enabled: _i == 1, child: const SettingsPage()) : const SizedBox.shrink(),
+      TickerMode(enabled: _i == 0, child: HomePage(openSettings: () => Navigator.push(context, adaptiveRoute((_) => const SettingsPage())))),
+      const SizedBox.shrink(), // تنظیمات دیگر تب نیست؛ از پروفایل بالا-راست خانه باز می‌شود
       _seen.contains(2) ? TickerMode(enabled: _i == 2, child: const InfoPage()) : const SizedBox.shrink(),
       _seen.contains(3) ? TickerMode(enabled: _i == 3, child: const FirefoxPage()) : const SizedBox.shrink(),
     ]);
@@ -366,37 +392,41 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   }
 }
 
+// آخرین خطای خام هسته (اگر باشد) برای عیب‌یابی؛ حداکثر ۲ خط
+String _coreLog() {
+  final e = VpnService.I.lastError.trim();
+  if (e.isEmpty) return '';
+  final lines = e.split('\n').where((x) => x.trim().isNotEmpty).toList();
+  final t = lines.sublist(lines.length > 2 ? lines.length - 2 : 0).join('\n');
+  return '\n' + (t.length > 160 ? t.substring(t.length - 160) : t);
+}
+
 String _errText(String r) {
+  // متن ساده برای کاربر؛ جزئیات فنی فقط در «لاگ» پنل ادمین ثبت می‌شود.
   switch (r) {
-    case 'no_config':
-      return 'کانفیگی دریافت نشده است';
-    case 'unsupported':
-      return 'اتصال در این پلتفرم پشتیبانی نمی‌شود';
-    case 'dns_failed':
-      return 'تست پینگ DNS ناموفق بود؛ اتصال برقرار نشد';
-    case 'tunnel_failed':
-      return 'ساخت تونل شخصی ناموفق بود؛ اتصال برقرار نشد';
-    case 'no_valid_ping':
-      return 'هیچ کانفیگی پینگ معتبر نداشت؛ اینترنت را بررسی کن';
-    case 'left_app':
-      return 'چون از برنامه خارج شدی، مراحل تونل کامل نشد و اتصال برقرار نشد';
-    case 'timeout':
-    case 'no_internet':
-    case 'core_failed':
-      return 'هیچ‌کدام از کانفیگ‌ها وصل نشد؛ اینترنت یا سرور را بررسی کن';
     case 'busy':
       return 'در حال اتصال...';
     case 'cancelled':
       return 'اتصال لغو شد';
     case 'permission':
       return 'دسترسی VPN داده نشد';
-    case 'bad_link':
-      return 'لینک کانفیگ معتبر نیست';
-    case 'no_core':
-      return 'هسته اتصال پیدا نشد';
+    case 'no_config':
+    case 'no_valid_ping':
+    case 'server_dns':
+      return 'سرور در دسترس نیست؛ کمی بعد دوباره تلاش کن';
     default:
-      return 'اتصال ناموفق بود';
+      return 'اتصال برقرار نشد؛ دوباره تلاش کن';
   }
+}
+
+/// ثبت بی‌صدای خطای اتصال برای پنل ادمین (کاربر چیزی نمی‌بیند).
+void _logConnFail(String area, String r) {
+  if (r == 'cancelled' || r == 'busy') return;
+  var cid = '';
+  try {
+    cid = '${Store.config.value?['id'] ?? ''}';
+  } catch (_) {}
+  unawaited(Api.logError(area, r, detail: VpnService.I.lastError, config: cid));
 }
 
 class HomePage extends StatefulWidget {
@@ -442,42 +472,64 @@ class _HomePageState extends State<HomePage> {
       final r = await ConnectGlobe.run(context, v.connect, _errText);
       if (!mounted) return;
       if (r != null) {
+        _logConnFail('خانه / دکمه‌ی اتصال', r);
         snack(context, _errText(r));
       } else {
         showConnPopup(context);
       }
     } else {
+      if (Store.confirmDisconnect) {
+        if (!mounted) return;
+        final ok = await showDialog<bool>(
+          context: context,
+          builder: (ctx) {
+            final p = P.of(ctx);
+            return Directionality(
+              textDirection: TextDirection.rtl,
+              child: AlertDialog(
+                backgroundColor: p.card,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+                title: Text('قطع اتصال؟', style: TextStyle(color: p.text, fontSize: 17, fontWeight: FontWeight.w800)),
+                content: Text('اتصال VPN قطع می‌شود.', style: TextStyle(color: p.sub, fontSize: 14)),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text('ادامه‌ی اتصال', style: TextStyle(color: p.sub))),
+                  FilledButton(style: FilledButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () => Navigator.pop(ctx, true), child: const Text('قطع کن')),
+                ],
+              ),
+            );
+          },
+        );
+        if (ok != true) return;
+      }
       await v.disconnect();
     }
   }
 
   late final ValueNotifier<Phase> _phase = ValueNotifier(VpnService.I.status.value.phase);
 
-  String _pingFor = '';
-
-  void _pingSel() {
-    final c = Store.config.value;
-    if (c == null) return;
-    final vs = VpnService.I;
-    if (vs.status.value.phase != Phase.off) return;
-    final key = '${c['id']}|${c['link']}';
-    if (_pingFor == key) return;
-    _pingFor = key;
-    unawaited(vs.relayPing('${c['link']}', id: '${c['id']}'));
-  }
-
   @override
   void initState() {
     super.initState();
     VpnService.I.status.addListener(_onStatus);
-    Store.config.addListener(_pingSel);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _pingSel());
+    homeConnectRequest.addListener(_onConnectReq);
+  }
+
+  /// فلش صفحه‌ی کانفیگ‌ها: لوکیشن انتخاب شده و کاربر به خانه برگشته → اتصال را برقرار کن.
+  Future<void> _onConnectReq() async {
+    // یک فریم صبر می‌کنیم تا صفحه‌های بالایی کاملاً بسته شوند و خانه دیده شود
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    if (!mounted) return;
+    final v = VpnService.I;
+    if (v.status.value.phase == Phase.connecting) return;
+    if (v.status.value.phase == Phase.on) await v.disconnect();
+    if (!mounted) return;
+    await _toggle(true);
   }
 
   @override
   void dispose() {
+    homeConnectRequest.removeListener(_onConnectReq);
     VpnService.I.status.removeListener(_onStatus);
-    Store.config.removeListener(_pingSel);
     _phase.dispose();
     super.dispose();
   }
@@ -497,23 +549,32 @@ class _HomePageState extends State<HomePage> {
         final on = ph == Phase.on;
         final busy = ph == Phase.connecting;
 
-        final top = Directionality(
-          textDirection: TextDirection.ltr,
-          child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            TourTarget('home.menu', IconButton(onPressed: widget.openSettings, icon: Icon(Icons.menu_rounded, color: p.text, size: 32))),
-            TourTarget('home.premium', IconButton(
-              onPressed: () => snack(context, 'نسخه پریمیوم به‌زودی'),
-              icon: const Icon(Icons.workspace_premium_rounded, color: Color(0xFFFFC53D), size: 28),
-            )),
-          ]),
-        );
-
-        final brand = Directionality(
-          textDirection: TextDirection.ltr,
-          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            Brand(size: wide ? 110 : 96),
-            const SizedBox(width: 14),
-            NexoraWordmark(fontSize: wide ? 32 : 27, textColor: p.text),
+        final top = SizedBox(
+          height: 92,
+          child: Stack(children: [
+            const Positioned.fill(child: IgnorePointer(child: HeaderWave())),
+            Directionality(
+              textDirection: TextDirection.ltr,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 6, left: 6, right: 4),
+                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  TourTarget('home.menu', ProfileButton(onTap: widget.openSettings)),
+                  TourTarget('home.premium', IconButton(
+                    onPressed: () => snack(context, 'نسخه پریمیوم به‌زودی'),
+                    icon: const Icon(Icons.workspace_premium_rounded, color: Color(0xFFFFC53D), size: 26),
+                  )),
+                  const Spacer(),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 1),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Text('Nexora', style: TextStyle(color: p.text, fontSize: 25, fontWeight: FontWeight.w800, letterSpacing: 0.4)),
+                      const SizedBox(width: 10),
+                      const NexoraMark(size: 46),
+                    ]),
+                  ),
+                ]),
+              ),
+            ),
           ]),
         );
 
@@ -577,7 +638,7 @@ class _HomePageState extends State<HomePage> {
           ),
         );
 
-        final brandBlock = Column(children: [TourTarget('home.brand', brand), TourTarget('home.status', statusChip), TourTarget('home.features', features)]);
+        final brandBlock = Column(children: [TourTarget('home.status', statusChip), TourTarget('home.features', features)]);
 
         final server = ValueListenableBuilder<Map<String, dynamic>?>(
           valueListenable: Store.config,
@@ -614,25 +675,6 @@ class _HomePageState extends State<HomePage> {
                           const SizedBox(width: 8),
                           Container(width: 10, height: 10, decoration: BoxDecoration(color: p.sub.withOpacity(0.6), shape: BoxShape.circle)),
                         ]),
-                        if (has)
-                          ValueListenableBuilder<int>(
-                            valueListenable: VpnService.I.pingCacheRev,
-                            builder: (_, __, ___) {
-                              final v = VpnService.I.pingCache['${cfg['id']}'];
-                              const green = Color(0xFF29E07F);
-                              final ok = v != null && v >= 1;
-                              final txt = v == null ? 'Ping: ...' : (ok ? 'Ping: $v ms' : 'Ping: timeout');
-                              final col = v == null ? p.sub : (ok ? green : Colors.redAccent);
-                              return Padding(
-                                padding: const EdgeInsets.only(top: 5),
-                                child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [
-                                  Text(txt, style: TextStyle(color: col, fontSize: 13, fontWeight: FontWeight.w700)),
-                                  const SizedBox(width: 8),
-                                  Container(width: 10, height: 10, decoration: BoxDecoration(color: col, shape: BoxShape.circle, boxShadow: ok ? [BoxShadow(color: green.withOpacity(0.7), blurRadius: 6)] : null)),
-                                ]),
-                              );
-                            },
-                          ),
                       ]),
                     ),
                   ]),
@@ -677,20 +719,27 @@ class _HomePageState extends State<HomePage> {
 
         final state = Panel(
           margin: const EdgeInsets.only(bottom: 4, top: 0),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           child: Directionality(
-            textDirection: TextDirection.ltr,
+            textDirection: TextDirection.rtl,
             child: Row(children: [
+              Container(
+                width: 46,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF070B1E),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0xFF3B6BFF).withOpacity(0.25)),
+                ),
+                child: Icon(on ? Icons.check_rounded : Icons.keyboard_double_arrow_right_rounded,
+                    color: on ? const Color(0xFF29E07F) : const Color(0xFF3D7BFF), size: 28),
+              ),
+              const SizedBox(width: 14),
               Expanded(
                 child: Text(on ? 'متصل هستید' : 'برای اتصال، سوئیچ را به راست بکشید',
-                    textDirection: TextDirection.rtl,
                     textAlign: TextAlign.right,
                     style: TextStyle(color: on ? const Color(0xFF29E07F) : p.text, fontSize: 15)),
               ),
-              if (!on) ...[
-                const SizedBox(width: 8),
-                Icon(Icons.keyboard_double_arrow_left_rounded, color: p.accent2, size: 30),
-              ],
             ]),
           ),
         );
@@ -705,7 +754,7 @@ class _HomePageState extends State<HomePage> {
                 ),
         );
 
-        final speeds = !on ? const SizedBox.shrink() : TrafficCard(
+        final speeds = (!on || !Store.getBool('show_traffic', true)) ? const SizedBox.shrink() : TrafficCard(
           reader: () {
             final st = VpnService.I.status.value;
             return TrafficSample(
@@ -926,21 +975,36 @@ class _LocationsPageState extends State<LocationsPage> {
   bool _pinging = false;
   bool _busy = false;
 
+  // فیلتر بالای لیست: all / premium / free / fav
+  String _tab = 'all';
+  bool _searching = false;
+  String _query = '';
+  final TextEditingController _searchCtl = TextEditingController();
+  Set<String> _favs = {};
+
   @override
   void initState() {
     super.initState();
-    // نتایج کش‌شده‌ی تست پس‌زمینه فوری نمایش داده می‌شود؛ اگر کامل و تازه باشند، تست دوباره‌ی کامل لازم نیست.
-    final vs = VpnService.I;
-    final cfgs = Store.configs.value;
-    for (final c in cfgs) {
-      final v = vs.pingCache['${c['id']}'];
-      if (v != null) _ms['${c['id']}'] = v;
-    }
-    // فقط لوکیشن/کانفیگ انتخاب‌شده تست می‌شود (حالت «خودکار» چون باید بهترین را پیدا کند، همه را می‌خواهد)
-    final target = Store.candidates();
-    final at = vs.pingCacheAt;
-    final fresh = at != null && DateTime.now().difference(at).inMinutes < 3 && target.isNotEmpty && target.every((c) => _ms.containsKey('${c['id']}'));
-    if (!fresh) WidgetsBinding.instance.addPostFrameCallback((_) => _pingAll(onlySelected: true));
+    // تست پینگ دیگر خودکار اجرا نمی‌شود؛
+    // فقط با زدن دکمه‌ی «تست پینگ» (بالای صفحه) شروع می‌شود.
+    // (نتایج پس‌زمینه‌ی قبلی هم نمایش داده نمی‌شود تا ورود به صفحه شبیه تست خودکار نباشد.)
+    try {
+      final raw = Store.getStr('favServers');
+      if (raw.isNotEmpty) _favs = (jsonDecode(raw) as List).map((e) => '$e').toSet();
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    _searchCtl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _toggleFav(String id) async {
+    setState(() {
+      if (!_favs.add(id)) _favs.remove(id);
+    });
+    await Store.setStr('favServers', jsonEncode(_favs.toList()));
   }
 
   /// پینگ واقعی فقط یک کانفیگ (لمس چیپ پینگ همان ردیف)؛ بقیه‌ی کانفیگ‌ها تست نمی‌شوند.
@@ -973,13 +1037,15 @@ class _LocationsPageState extends State<LocationsPage> {
       await _pingOne(list.first);
       return;
     }
+    // تست‌های پس‌زمینه‌ی قبلی لغو می‌شوند تا صف تست فقط مال همین اجرا باشد
+    VpnService.I.cancelPings();
     setState(() {
       _pinging = true;
       for (final c in list) {
         _ms.remove('${c['id']}');
       }
     });
-    final r = await ConnectGlobe.runTest(context, (ctl) async {
+    final r = await _runPingTest(context, (ctl) async {
       ctl.total.value = list.length;
       Map<String, dynamic>? best;
       var bestMs = 1 << 30;
@@ -1021,12 +1087,28 @@ class _LocationsPageState extends State<LocationsPage> {
         await Future.wait([for (var k = 0; k < workers; k++) worker()]);
       }
 
-      final firstBudget = Duration(seconds: (list.length / 16).ceil() * 9 + 12);
-      await runPass(list, 16, true).timeout(firstBudget, onTimeout: () {});
+      // مثل V2rayNG همه‌ی سرورها تست می‌شوند و هر سرور Timeout مخصوص خودش را دارد (۱۲ ثانیه از شروع واقعی تست)؛
+      // پس بودجه‌ی کلی فقط یک سقف خیلی بزرگ است تا به‌خاطر طولانی‌شدن صف، سرورهای آخر Timeout نشوند.
+      final firstBudget = Duration(seconds: list.length * 16 + 30);
+      final alive = <Map<String, dynamic>>[];
+      await Future.wait([
+        for (final c in list)
+          () async {
+            final info = parseLink('${c['link']}');
+            final tcpOk = info.outbound == null || info.engine != 'xray' || info.transport.contains('kcp') || info.transport.contains('quic') || await Api.pingLink('${c['link']}', timeoutSec: 2) >= 0;
+            if (tcpOk) {
+              alive.add(c);
+            } else {
+              record(c, -1);
+            }
+          }(),
+      ]);
+      alive.sort((a, b) => list.indexOf(a).compareTo(list.indexOf(b)));
+      await runPass(alive, 1, true).timeout(firstBudget, onTimeout: () {});
       if (!ctl.cancelRequested && best == null) {
         final failed = [for (final c in list) if (!Api.validPing(_ms['${c['id']}'] ?? -1)) c];
         if (failed.isNotEmpty) {
-          await runPass(failed.take(6).toList(), 6, false).timeout(const Duration(seconds: 10), onTimeout: () {});
+          await runPass(failed.take(4).toList(), 1, false).timeout(const Duration(seconds: 40), onTimeout: () {});
         }
       }
       if (ctl.cancelRequested) return 'cancelled';
@@ -1046,9 +1128,14 @@ class _LocationsPageState extends State<LocationsPage> {
       ctl.sub = '$bestMs ms';
       return null;
     }, _errText);
+    VpnService.I.pingCacheAt = DateTime.now(); // اتصال «خودکار» بعدی از همین نتایج تازه استفاده می‌کند
+    VpnService.I.pingCacheRev.value++;
     if (mounted) {
       setState(() => _pinging = false);
-      if (r != null && r != 'cancelled' && r != 'no_valid_ping') snack(context, _errText(r));
+      if (r != null && r != 'cancelled' && r != 'no_valid_ping') {
+        _logConnFail('لیست سرورها / تست پینگ و اتصال', r);
+        snack(context, _errText(r));
+      }
     }
   }
 
@@ -1057,23 +1144,22 @@ class _LocationsPageState extends State<LocationsPage> {
     final ok = await Api.sync();
     if (mounted) {
       setState(() => _busy = false);
-      snack(context, ok ? 'لیست به‌روز شد (${Store.configs.value.length} کانفیگ)' : 'سرور در دسترس نیست (${Api.lastSyncError.isEmpty ? 'نامشخص' : Api.lastSyncError})');
-      _pingAll();
+      if (!ok) unawaited(Api.logError('لیست سرورها / به‌روزرسانی', 'sync_failed', detail: Api.lastSyncError));
+      snack(context, ok ? 'لیست به‌روز شد (${Store.configs.value.length} کانفیگ)' : 'سرور در دسترس نیست؛ کمی بعد دوباره تلاش کن');
     }
   }
 
-  Future<void> _choose(String id, String label) async {
+  /// انتخاب لوکیشن. [connect] = true (دکمه‌ی فلش): به خانه برمی‌گردد و اتصال برقرار می‌شود.
+  Future<void> _choose(String id, String label, {bool connect = false}) async {
     await Store.setServerId(id);
     Store.applySelection();
-    if (id.isNotEmpty) {
-      for (final c in Store.configs.value) {
-        if ('${c['id']}' == id) {
-          unawaited(VpnService.I.relayPing('${c['link']}', id: id));
-          break;
-        }
-      }
-    }
     if (!mounted) return;
+    if (connect) {
+      // همه‌ی صفحه‌های بالای خانه (کانفیگ‌ها، تنظیمات ...) بسته می‌شوند و خانه اتصال را شروع می‌کند
+      Navigator.of(context).popUntil((r) => r.isFirst);
+      homeConnectRequest.value++;
+      return;
+    }
     snack(context, 'انتخاب شد: $label');
     Navigator.pop(context);
   }
@@ -1108,14 +1194,14 @@ class _LocationsPageState extends State<LocationsPage> {
                 ),
               ),
               const SizedBox(height: 12),
-              Text('لینک کانفیگ (vless, vmess, trojan, ss) را پیست کنید:', style: TextStyle(color: p.sub, fontSize: 12)),
+              Text('لینک کانفیگ (vless, vmess, trojan, ss, hy2, tuic, wireguard) را پیست کنید:', style: TextStyle(color: p.sub, fontSize: 12)),
               const SizedBox(height: 6),
               TextField(
                 controller: ctl,
                 maxLines: 3,
                 style: TextStyle(color: p.text, fontSize: 12),
                 decoration: InputDecoration(
-                  hintText: 'vless://... یا vmess://...',
+                  hintText: 'vless://... vmess://... hy2://... tuic://... wireguard://...',
                   hintStyle: TextStyle(color: p.sub.withOpacity(0.5)),
                   filled: true,
                   fillColor: p.bg,
@@ -1182,14 +1268,8 @@ class _LocationsPageState extends State<LocationsPage> {
               if (ctx.mounted) Navigator.pop(ctx);
               if (mounted) setState(() {});
               snack(context, edit == null ? 'کانفیگ اضافه و انتخاب شد' : 'کانفیگ ویرایش شد');
-              final id = edit == null ? '' : '${edit['id']}';
-              if (edit == null) {
-                _pingAll(onlySelected: true);
-              } else {
-                _ms.remove(id);
-                final cur = Store.configs.value.where((e) => '${e['id']}' == id);
-                if (cur.isNotEmpty) _pingOne(cur.first);
-              }
+              // تست پینگ خودکار حذف شده؛ فقط با دکمه‌ی «تست پینگ» اجرا می‌شود
+              if (edit != null) _ms.remove('${edit['id']}');
             },
             child: Text(edit == null ? 'افزودن و انتخاب' : 'ذخیره'),
           ),
@@ -1232,42 +1312,114 @@ class _LocationsPageState extends State<LocationsPage> {
     }
   }
 
-  Widget _radio(P p, bool sel) => Icon(sel ? Icons.radio_button_checked : Icons.radio_button_off, color: sel ? p.accent2 : p.sub, size: 26);
+  static const Color _kPurple = Color(0xFFB45CFF);
+  static const Color _kGreenMs = Color(0xFF29E07F);
+
+  Widget _roundBtn(P p, IconData icon, VoidCallback onTap, {String? tip}) => Tooltip(
+        message: tip ?? '',
+        child: InkResponse(
+          onTap: onTap,
+          radius: 24,
+          child: Padding(padding: const EdgeInsets.all(6), child: Icon(icon, color: p.accent2, size: 27)),
+        ),
+      );
 
   Widget _header(P p) => Directionality(
         textDirection: TextDirection.ltr,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(6, 6, 14, 10),
+          padding: const EdgeInsets.fromLTRB(8, 6, 10, 8),
           child: Row(children: [
-            SizedBox(
-              width: 44,
-              child: IconButton(
-                onPressed: () => Navigator.maybePop(context),
-                icon: Icon(Icons.chevron_left_rounded, color: p.text, size: 34),
-              ),
+            _roundBtn(p, Icons.chevron_left_rounded, () => Navigator.maybePop(context)),
+            const SizedBox(width: 2),
+            Expanded(
+              child: _searching
+                  ? TextField(
+                      controller: _searchCtl,
+                      autofocus: true,
+                      onChanged: (v) => setState(() => _query = v.trim().toLowerCase()),
+                      style: TextStyle(color: p.text, fontSize: 15),
+                      decoration: InputDecoration(
+                        hintText: 'Search',
+                        hintStyle: TextStyle(color: p.sub),
+                        isDense: true,
+                        filled: true,
+                        fillColor: p.card,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: p.border)),
+                        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide(color: p.border.withOpacity(0.6))),
+                      ),
+                    )
+                  : Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      Icon(Icons.layers_rounded, color: p.accent2, size: 30),
+                      const SizedBox(width: 10),
+                      Text('Config', style: TextStyle(color: p.text, fontSize: 24, fontWeight: FontWeight.w800)),
+                    ]),
             ),
-            Expanded(child: Center(child: Text('سرورها', style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.w800)))),
-            IconButton(
-              tooltip: 'افزودن سرور شخصی',
-              icon: Icon(Icons.add_link_rounded, color: p.accent2, size: 26),
-              onPressed: () => _addCustomConfig(context),
-            ),
-            const SizedBox(width: 4),
+            const SizedBox(width: 6),
+            // دکمه‌ی «تست پینگ» گوشه‌ی بالا؛ تنها راه شروع تست پینگ
             GestureDetector(
-              onTap: () => _pingAll(),
+              onTap: _pinging
+                  ? () {
+                      _activePing?.cancel();
+                      VpnService.I.cancelPings();
+                    }
+                  : () => _pingAll(),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 decoration: BoxDecoration(
                   gradient: LinearGradient(colors: [p.accent, p.accent2]),
                   borderRadius: BorderRadius.circular(20),
-                  boxShadow: [BoxShadow(color: p.accent.withOpacity(0.45), blurRadius: 12)],
+                  boxShadow: [BoxShadow(color: p.accent.withOpacity(0.4), blurRadius: 10)],
                 ),
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
                   _pinging
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                      : const Icon(Icons.speed_rounded, color: Colors.white, size: 18),
-                  const SizedBox(width: 6),
-                  const Text('پینگ', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 14)),
+                      ? const Icon(Icons.close_rounded, color: Colors.white, size: 17)
+                      : const Icon(Icons.speed_rounded, color: Colors.white, size: 17),
+                  const SizedBox(width: 5),
+                  Text(_pinging ? 'لغو' : 'تست پینگ', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 13)),
+                ]),
+              ),
+            ),
+            const SizedBox(width: 2),
+            _roundBtn(p, _searching ? Icons.close_rounded : Icons.search_rounded, () {
+              setState(() {
+                _searching = !_searching;
+                if (!_searching) {
+                  _query = '';
+                  _searchCtl.clear();
+                }
+              });
+            }),
+          ]),
+        ),
+      );
+
+  Widget _banner(P p) => Container(
+        height: 132,
+        margin: const EdgeInsets.fromLTRB(16, 2, 16, 12),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: p.accent.withOpacity(0.55)),
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF0A1B52), Color(0xFF1546C4), Color(0xFF0B2A86)],
+          ),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(22),
+          child: Stack(children: [
+            Positioned(right: -34, top: -30, child: Container(width: 190, height: 190, decoration: BoxDecoration(shape: BoxShape.circle, gradient: RadialGradient(colors: [const Color(0xFF55B5FF).withOpacity(0.55), Colors.transparent])))),
+            Positioned(right: 26, top: 22, child: Icon(Icons.verified_user_rounded, size: 78, color: const Color(0xFF7CC4FF).withOpacity(0.92))),
+            Positioned(
+              left: 18,
+              bottom: 14,
+              child: Directionality(
+                textDirection: TextDirection.ltr,
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                  const Text('Choose Your\nBest Config', style: TextStyle(color: Colors.white, fontSize: 24, height: 1.1, fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 6),
+                  Text('Fast  •  Secure  •  Global', style: TextStyle(color: Colors.white.withOpacity(0.72), fontSize: 13, fontWeight: FontWeight.w600)),
                 ]),
               ),
             ),
@@ -1275,84 +1427,209 @@ class _LocationsPageState extends State<LocationsPage> {
         ),
       );
 
-  Widget _pingChip(P p, String id) {
-    final v = _ms[id];
-    const green = Color(0xFF29E07F);
-    final Widget chip;
-    if (_rowPinging.contains(id)) {
-      chip = const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: green));
-    } else if (v == null) {
-      chip = _pinging
-          ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: green))
-          : Text('—', style: TextStyle(color: p.sub));
-    } else if (v < 0) {
-      chip = const Text('timeout', style: TextStyle(color: Colors.redAccent, fontSize: 12, fontWeight: FontWeight.w700));
-    } else {
-      chip = Row(mainAxisSize: MainAxisSize.min, children: [
-        Container(width: 8, height: 8, decoration: BoxDecoration(color: green, shape: BoxShape.circle, boxShadow: [BoxShadow(color: green.withOpacity(0.8), blurRadius: 6)])),
-        const SizedBox(width: 5),
-        Text('$v ms', style: const TextStyle(color: green, fontSize: 13, fontWeight: FontWeight.w800)),
-      ]);
-    }
-    return chip;
-  }
-
-  Widget _cfgRow(P p, Map<String, dynamic> c, String sid) {
-    final id = '${c['id']}';
-    final country = '${c['country'] ?? ''}';
-    final code = '${c['code'] ?? ''}';
-    final proto = '${c['protocol'] ?? ''}'.toUpperCase();
-    final tr = '${c['transport'] ?? ''}';
-    final kind = proto.isEmpty ? '' : (tr.isEmpty ? proto : '$proto · $tr');
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: () => _choose(id, cfgTitle(c)),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-          child: Directionality(
-            textDirection: TextDirection.ltr,
-            child: Row(children: [
-              PinIcon(size: 44, color: p.accent2, animate: false),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(cfgTitle(c), textDirection: TextDirection.rtl, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.w700)),
-                  const SizedBox(height: 3),
-                  Text(
-                    country.isEmpty || cfgTitle(c).contains(country) ? '' : '${flagOf(code)} $country',
-                    textDirection: TextDirection.rtl,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: p.sub, fontSize: 12),
-                  ),
-                ]),
-              ),
-              if (Store.isCustom(c)) ...[
-                InkWell(
-                  borderRadius: BorderRadius.circular(16),
-                  onTap: () => _addCustomConfig(context, edit: c),
-                  child: Padding(padding: const EdgeInsets.all(6), child: Icon(Icons.edit_rounded, size: 19, color: p.accent2)),
-                ),
-                InkWell(
-                  borderRadius: BorderRadius.circular(16),
-                  onTap: () => _deleteCustom(c),
-                  child: const Padding(padding: EdgeInsets.all(6), child: Icon(Icons.delete_outline_rounded, size: 20, color: Colors.redAccent)),
-                ),
-              ],
-              const SizedBox(width: 8),
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => _pingOne(c),
-                child: Padding(padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 6), child: _pingChip(p, id)),
-              ),
-              const SizedBox(width: 10),
-              _radio(p, sid == id),
-            ]),
+  Widget _chipBtn(P p, String key, String label, {IconData? icon}) {
+    final sel = _tab == key;
+    return Expanded(
+      flex: icon == null ? 3 : 1,
+      child: GestureDetector(
+        onTap: () => setState(() => _tab = key),
+        child: Container(
+          height: 42,
+          margin: const EdgeInsets.symmetric(horizontal: 4),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(21),
+            gradient: sel ? LinearGradient(colors: [p.accent2, p.accent]) : null,
+            color: sel ? null : p.card.withOpacity(0.7),
+            border: Border.all(color: sel ? Colors.transparent : p.border.withOpacity(0.7)),
+            boxShadow: sel ? [BoxShadow(color: p.accent.withOpacity(0.45), blurRadius: 12)] : null,
           ),
+          child: icon != null
+              ? Icon(icon, color: sel ? Colors.white : p.text, size: 22)
+              : Text(label, style: TextStyle(color: sel ? Colors.white : p.text, fontSize: 15, fontWeight: FontWeight.w700)),
         ),
       ),
     );
   }
+
+  Widget _chips(P p) => Padding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: Row(children: [
+            _chipBtn(p, 'all', 'All'),
+            _chipBtn(p, 'premium', 'Premium'),
+            _chipBtn(p, 'free', 'Free'),
+            _chipBtn(p, 'fav', '', icon: Icons.star_rounded),
+          ]),
+        ),
+      );
+
+  Widget _pingText(P p, String id) {
+    final v = _ms[id];
+    final Widget w;
+    if (_rowPinging.contains(id) || (v == null && _pinging)) {
+      w = const PingSpinner(key: ValueKey('spin'));
+    } else if (v == null) {
+      w = Text('—', key: const ValueKey('none'), style: TextStyle(color: p.sub, fontSize: 15));
+    } else if (!Api.validPing(v)) {
+      w = const Text('Timeout', key: ValueKey('to'), style: TextStyle(color: _kPurple, fontSize: 16, fontWeight: FontWeight.w800));
+    } else {
+      w = Text('$v ms', key: ValueKey('ms$v'), style: const TextStyle(color: _kGreenMs, fontSize: 17, fontWeight: FontWeight.w800));
+    }
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 260),
+      transitionBuilder: (c, a) => FadeTransition(opacity: a, child: ScaleTransition(scale: Tween<double>(begin: 0.7, end: 1).animate(a), child: c)),
+      child: w,
+    );
+  }
+
+  Widget _leadIcon(P p, String code, bool timedOut) {
+    final hasFlag = code.length == 2 && !timedOut;
+    return Container(
+      width: 44,
+      height: 44,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: hasFlag ? p.card : const Color(0xFF2A1F5E),
+        border: Border.all(color: p.border.withOpacity(0.6)),
+      ),
+      child: hasFlag
+          ? Text(flagOf(code), style: const TextStyle(fontSize: 26))
+          : Icon(timedOut ? Icons.access_time_rounded : Icons.public_rounded, color: const Color(0xFFC9B8FF), size: 25),
+    );
+  }
+
+  Widget _rowShell(P p, {required bool selected, required Widget child, VoidCallback? onTap, VoidCallback? onLong}) => Container(
+        margin: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(30),
+          gradient: LinearGradient(colors: [p.card.withOpacity(0.95), p.bg.withOpacity(0.9)]),
+          border: Border.all(color: selected ? p.accent2 : p.border.withOpacity(0.55), width: selected ? 1.6 : 1),
+          boxShadow: selected ? [BoxShadow(color: p.accent.withOpacity(0.35), blurRadius: 14)] : null,
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(30),
+            onTap: onTap,
+            onLongPress: onLong,
+            child: Padding(padding: const EdgeInsets.fromLTRB(10, 8, 10, 8), child: child),
+          ),
+        ),
+      );
+
+  /// دکمه‌ی فلش: لوکیشن را انتخاب می‌کند، به خانه می‌رود و اتصال را برقرار می‌کند.
+  Widget _arrowBtn(P p, VoidCallback onTap) => GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: p.accent2.withOpacity(0.8), width: 1.4)),
+          child: Icon(Icons.chevron_right_rounded, color: p.text, size: 26),
+        ),
+      );
+
+  Widget _autoRow(P p, String sid) {
+    final sel = sid.isEmpty || sid.startsWith('loc:');
+    return _rowShell(
+      p,
+      selected: sel,
+      onTap: () => _choose('', 'خودکار'),
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: Row(children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: p.card, border: Border.all(color: p.border.withOpacity(0.6))),
+            child: const Icon(Icons.bolt_rounded, color: Colors.amber, size: 26),
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Text('Best Server', style: TextStyle(color: p.text, fontSize: 17, fontWeight: FontWeight.w700))),
+          _arrowBtn(p, () => _choose('', 'خودکار', connect: true)),
+        ]),
+      ),
+    );
+  }
+
+  Widget _cfgRow(P p, Map<String, dynamic> c, String sid) {
+    final id = '${c['id']}';
+    final code = '${c['code'] ?? ''}';
+    final v = _ms[id];
+    final timedOut = v != null && !Api.validPing(v);
+    final fav = _favs.contains(id);
+    return _rowShell(
+      p,
+      selected: sid == id,
+      onTap: () => _choose(id, cfgTitle(c)),
+      onLong: () {
+        _toggleFav(id);
+        snack(context, fav ? 'از علاقه‌مندی‌ها حذف شد' : 'به علاقه‌مندی‌ها اضافه شد');
+      },
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: Row(children: [
+          _leadIcon(p, code, timedOut),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Row(children: [
+              Flexible(child: Text(cfgTitle(c), overflow: TextOverflow.ellipsis, style: TextStyle(color: p.text, fontSize: 17, fontWeight: FontWeight.w700))),
+              if (fav) const Padding(padding: EdgeInsets.only(left: 6), child: Icon(Icons.star_rounded, color: Colors.amber, size: 16)),
+            ]),
+          ),
+          if (Store.isCustom(c)) ...[
+            InkWell(
+              borderRadius: BorderRadius.circular(16),
+              onTap: () => _addCustomConfig(context, edit: c),
+              child: Padding(padding: const EdgeInsets.all(5), child: Icon(Icons.edit_rounded, size: 18, color: p.accent2)),
+            ),
+            InkWell(
+              borderRadius: BorderRadius.circular(16),
+              onTap: () => _deleteCustom(c),
+              child: const Padding(padding: EdgeInsets.all(5), child: Icon(Icons.delete_outline_rounded, size: 19, color: Colors.redAccent)),
+            ),
+          ],
+          // لمس پینگ همان ردیف = تست فقط همین سرور (باز هم فقط با لمس کاربر)
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => _pingOne(c),
+            child: Padding(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8), child: _pingText(p, id)),
+          ),
+          _arrowBtn(p, () => _choose(id, cfgTitle(c), connect: true)),
+        ]),
+      ),
+    );
+  }
+
+  Widget _premiumSoon(P p) => Container(
+        margin: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 34),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(26),
+          gradient: LinearGradient(colors: [p.card.withOpacity(0.95), p.bg.withOpacity(0.9)]),
+          border: Border.all(color: p.border.withOpacity(0.7)),
+        ),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 74,
+            height: 74,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0xFF2A1F5E), border: Border.all(color: _kPurple.withOpacity(0.7))),
+            child: const Icon(Icons.lock_rounded, color: Color(0xFFC9B8FF), size: 38),
+          ),
+          const SizedBox(height: 16),
+          Text('Premium', style: TextStyle(color: p.text, fontSize: 21, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 8),
+          Text('به زودی می‌آید', style: TextStyle(color: p.sub, fontSize: 15, fontWeight: FontWeight.w600)),
+        ]),
+      );
+
+  Widget _empty(P p, String text) => Padding(
+        padding: const EdgeInsets.all(30),
+        child: Center(child: Text(text, textAlign: TextAlign.center, style: TextStyle(color: p.sub))),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -1370,37 +1647,65 @@ class _LocationsPageState extends State<LocationsPage> {
                   valueListenable: Store.configs,
                   builder: (context, list, _) {
                     final sid = Store.serverId;
-                    final children = <Widget>[
-                      Group(children: [
-                        Tile(
-                          icon: Icons.auto_awesome_rounded,
-                          iconColor: Colors.amber,
-                          title: 'خودکار',
-                          subtitle: 'تست همه و اتصال به اولین سرور سالم',
-                          trailing: _radio(p, sid.isEmpty || sid.startsWith('loc:')),
-                          onTap: () => _choose('', 'خودکار'),
-                        ),
-                      ]),
-                    ];
-                    if (list.isEmpty) {
-                      children.add(Padding(
-                        padding: const EdgeInsets.all(30),
-                        child: Center(child: Text('کانفیگی وجود ندارد؛ بکش پایین تا به‌روز شود', textAlign: TextAlign.center, style: TextStyle(color: p.sub))),
-                      ));
+                    final children = <Widget>[_banner(p), _chips(p)];
+                    if (_tab == 'premium') {
+                      children.add(_premiumSoon(p));
+                    } else if (list.isEmpty) {
+                      children.add(_empty(p, 'کانفیگی وجود ندارد؛ بکش پایین تا به‌روز شود'));
                     } else {
+                      var shown = List<Map<String, dynamic>>.from(list);
+                      if (_tab == 'fav') shown = [for (final c in shown) if (_favs.contains('${c['id']}')) c];
+                      if (_query.isNotEmpty) {
+                        shown = [
+                          for (final c in shown)
+                            if (cfgTitle(c).toLowerCase().contains(_query) || '${c['country'] ?? ''}'.toLowerCase().contains(_query)) c
+                        ];
+                      }
                       int rank(Map<String, dynamic> c) {
                         final v = _ms['${c['id']}'];
                         if (v == null) return 1 << 29;
                         if (!Api.validPing(v)) return 1 << 30;
                         return v;
                       }
-                      final sorted = List<Map<String, dynamic>>.from(list)..sort((a, b) => rank(a).compareTo(rank(b)));
-                      children.add(Group(children: [for (final c in sorted) _cfgRow(p, c, sid)]));
+                      // مرتب‌سازی پایدار: بعد از تست، کمترین پینگ بالاتر؛ قبل از تست ترتیب اصلی لیست
+                      final idx = {for (var i = 0; i < shown.length; i++) '${shown[i]['id']}': i};
+                      shown.sort((a, b) {
+                        final r = rank(a).compareTo(rank(b));
+                        return r != 0 ? r : idx['${a['id']}']!.compareTo(idx['${b['id']}']!);
+                      });
+                      if (_tab != 'fav' && _query.isEmpty) children.add(_autoRow(p, sid));
+                      if (shown.isEmpty) {
+                        children.add(_empty(p, _tab == 'fav' ? 'هنوز علاقه‌مندی‌ای نداری؛ روی یک لوکیشن نگه دار' : 'موردی پیدا نشد'));
+                      } else {
+                        for (final c in shown) {
+                          children.add(_cfgRow(p, c, sid));
+                        }
+                      }
+                    }
+                    if (_tab != 'premium') {
+                      children.add(_rowShell(
+                        p,
+                        selected: false,
+                        onTap: () => _addCustomConfig(context),
+                        child: Directionality(
+                          textDirection: TextDirection.ltr,
+                          child: Row(children: [
+                            Container(
+                              width: 44,
+                              height: 44,
+                              decoration: BoxDecoration(shape: BoxShape.circle, color: p.card, border: Border.all(color: p.border.withOpacity(0.6))),
+                              child: Icon(Icons.add_link_rounded, color: p.accent2, size: 24),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(child: Text('افزودن سرور شخصی', style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.w700))),
+                          ]),
+                        ),
+                      ));
                     }
                     if (_busy) children.add(const Padding(padding: EdgeInsets.all(12), child: Center(child: CircularProgressIndicator())));
                     return ListView(
                       physics: const AlwaysScrollableScrollPhysics(),
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                      padding: const EdgeInsets.only(bottom: 24),
                       children: children,
                     );
                   },
@@ -1839,11 +2144,6 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  void _themeDialogSet(ThemeMode m) async {
-    await Store.setTheme(m);
-    if (mounted) setState(() {});
-  }
-
   String _serverLabel() {
     final sid = Store.serverId;
     if (sid.isEmpty) return 'بهترین سرور نزدیک شما';
@@ -1854,95 +2154,219 @@ class _SettingsPageState extends State<SettingsPage> {
     return 'انتخاب دستی';
   }
 
+  String _themeLabel() {
+    switch (Store.themeMode.value) {
+      case ThemeMode.light:
+        return 'روشن';
+      case ThemeMode.system:
+        return 'هماهنگ با سیستم';
+      default:
+        return 'تاریک';
+    }
+  }
+
+  void _pickTheme() {
+    final p = P.of(context);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: p.card,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
+      builder: (ctx) {
+        final mode = Store.themeMode.value;
+        Widget opt(ThemeMode m, IconData ic, String t, Color col) => STile(
+              icon: ic,
+              iconColor: col,
+              title: t,
+              onTap: () async {
+                await Store.setTheme(m);
+                if (ctx.mounted) Navigator.pop(ctx);
+                if (mounted) setState(() {});
+              },
+              trailing: Icon(mode == m ? Icons.radio_button_checked : Icons.radio_button_off, color: mode == m ? p.accent2 : p.sub, size: 26),
+            );
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 14, 8, 10),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text('ظاهر برنامه', style: TextStyle(color: p.text, fontSize: 17, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 8),
+              opt(ThemeMode.dark, Icons.dark_mode_rounded, 'حالت تاریک', const Color(0xFF5B5FE6)),
+              opt(ThemeMode.light, Icons.light_mode_rounded, 'حالت روشن', const Color(0xFFFFA726)),
+              opt(ThemeMode.system, Icons.phone_android_rounded, 'هماهنگ با سیستم', const Color(0xFF00A3BF)),
+            ]),
+          ),
+        );
+      },
+    );
+  }
+
+  void _editName() {
+    final p = P.of(context);
+    final ctl = TextEditingController(text: Store.userName.value);
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          backgroundColor: p.card,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+          title: Text('نام شما', style: TextStyle(color: p.text, fontSize: 17, fontWeight: FontWeight.w800)),
+          content: TextField(
+            controller: ctl,
+            autofocus: true,
+            maxLength: 24,
+            style: TextStyle(color: p.text, fontSize: 16),
+            decoration: InputDecoration(
+              counterText: '',
+              hintText: 'نام شما',
+              hintStyle: TextStyle(color: p.sub.withOpacity(0.7)),
+              filled: true,
+              fillColor: p.bg,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: Text('انصراف', style: TextStyle(color: p.sub))),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: p.accent),
+              onPressed: () async {
+                if (ctl.text.trim().isNotEmpty) await Store.setUserName(ctl.text);
+                if (ctx.mounted) Navigator.pop(ctx);
+              },
+              child: const Text('ذخیره'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openGuide() async {
+    final a = await showIntroPicker(context);
+    if (a == null || !mounted) return;
+    final nav = Navigator.of(context);
+    nav.pop();
+    await Future<void>.delayed(const Duration(milliseconds: 450));
+    await Tour.launch?.call(a.anim, a.buddy);
+  }
+
+  Widget _profile(P p) {
+    return ValueListenableBuilder<String>(
+      valueListenable: Store.userName,
+      builder: (context, name, _) => SCard(children: [
+        Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () async {
+              await Navigator.push(context, adaptiveRoute((_) => const ProfilePage()));
+              if (mounted) setState(() {});
+            },
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+              child: Directionality(
+                textDirection: TextDirection.rtl,
+                child: Row(children: [
+                  Expanded(
+                    child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(name.isEmpty ? 'کاربر NEXORA' : name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 4),
+                      Text('پروفایل · آمار و گزینه‌های شخصی', style: TextStyle(color: p.sub, fontSize: 13)),
+                      const SizedBox(height: 2),
+                      Text('Version $kAppVersion', textDirection: TextDirection.ltr, style: TextStyle(color: p.accent2, fontSize: 12.5, fontWeight: FontWeight.w700)),
+                    ]),
+                  ),
+                  Icon(Icons.chevron_left_rounded, color: p.sub, size: 28),
+                ]),
+              ),
+            ),
+          ),
+        ),
+        STile(
+          icon: Icons.pets_rounded,
+          iconColor: const Color(0xFFFF4FA3),
+          title: 'راهنما',
+          subtitle: 'انتخاب راهنما و آموزش قدم‌به‌قدم',
+          onTap: _openGuide,
+        ),
+      ]),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final p = P.of(context);
-    final mode = Store.themeMode.value;
-    Widget radio(ThemeMode m, IconData ic, String t, Color col) => Tile(
-          icon: ic,
-          iconColor: col,
-          title: t,
-          onTap: () => _themeDialogSet(m),
-          trailing: Icon(mode == m ? Icons.radio_button_checked : Icons.radio_button_off, color: mode == m ? p.accent2 : p.sub, size: 26),
-        );
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-      children: [
-        const PageHeader(title: 'تنظیمات', icon: Icons.settings_rounded),
-        const SectionTitle('کانفیگ و اتصال'),
-        Group(children: [
-          ValueListenableBuilder<Map<String, dynamic>?>(
-            valueListenable: Store.config,
-            builder: (context, cfg, _) => Tile(
-              icon: Icons.storage_rounded,
-              title: cfg == null ? 'کانفیگ' : cfgTitle(cfg),
-              subtitle: cfg != null && '${cfg['expires']}'.isNotEmpty ? 'اعتبار: ${cfg['expires']}' : 'دریافت نشده',
-              trailing: const Chevron(),
-              onTap: () => Navigator.push(context, adaptiveRoute((_) => const LocationsPage(initialTab: 1))),
-            ),
+    return SettingsScaffold(title: 'تنظیمات', children: [
+      _profile(p),
+      const SSection('کانفیگ و اتصال'),
+      SCard(children: [
+        ValueListenableBuilder<Map<String, dynamic>?>(
+          valueListenable: Store.config,
+          builder: (context, cfg, _) => STile(
+            icon: Icons.storage_rounded,
+            iconColor: const Color(0xFF3D7BFF),
+            title: cfg == null ? 'کانفیگ' : cfgTitle(cfg),
+            subtitle: cfg != null && '${cfg['expires']}'.isNotEmpty ? 'اعتبار: ${cfg['expires']}' : 'دریافت نشده',
+            onTap: () => Navigator.push(context, adaptiveRoute((_) => const LocationsPage(initialTab: 1))),
           ),
-          Tile(
-            icon: Icons.bolt_rounded,
-            iconColor: Colors.amber,
-            title: 'اتصال خودکار',
-            subtitle: 'در هنگام شروع برنامه',
-            trailing: Toggle(
-                value: Store.getBool('autoConnect', false),
-                onChanged: (v) async {
-                  await Store.setBool('autoConnect', v);
-                  setState(() {});
-                }),
-          ),
-          Tile(
-            icon: Icons.public_rounded,
-            title: 'انتخاب سرور دلخواه',
-            subtitle: _serverLabel(),
-            trailing: const Chevron(),
-            onTap: () async {
-              await Navigator.push(context, adaptiveRoute((_) => const LocationsPage()));
-              if (mounted) setState(() {});
-            },
-          ),
-        ]),
-        const SectionTitle('ظاهر برنامه'),
-        Group(children: [
-          radio(ThemeMode.dark, Icons.dark_mode_rounded, 'حالت تاریک', p.accent2),
-          radio(ThemeMode.light, Icons.light_mode_rounded, 'حالت روشن', Colors.amber),
-          radio(ThemeMode.system, Icons.desktop_windows_rounded, 'استفاده از تنظیمات سیستم', p.text),
-        ]),
-        const SectionTitle('اعلان‌ها'),
-        Group(children: [
-          Tile(
-            icon: Icons.notifications_rounded,
-            iconColor: Colors.amber,
-            title: 'اعلان اتصال',
-            trailing: Toggle(
-                value: Store.getBool('notif', true),
-                onChanged: (v) async {
-                  await Store.setBool('notif', v);
-                  setState(() {});
-                }),
-          ),
-        ]),
-        const SectionTitle('بیشتر'),
-        Group(children: [
-          Tile(
-            icon: Icons.system_update_rounded,
-            iconColor: const Color(0xFF6BE6FF),
-            title: 'به‌روزرسانی',
-            subtitle: 'Update',
-            trailing: const Chevron(),
-            onTap: () => Navigator.push(context, adaptiveRoute((_) => const UpdatePage())),
-          ),
-          Tile(
-            icon: Icons.tune_rounded,
-            title: 'تنظیمات پیشرفته',
-            trailing: const Chevron(),
-            onTap: () => Navigator.push(context, adaptiveRoute((_) => const AdvancedPage())),
-          ),
-        ]),
-      ],
-    );
+        ),
+        STile(
+          icon: Icons.bolt_rounded,
+          iconColor: const Color(0xFFFFA726),
+          title: 'اتصال خودکار',
+          subtitle: 'در هنگام شروع برنامه',
+          trailing: SToggle(
+              value: Store.getBool('autoConnect', false),
+              onChanged: (v) async {
+                await Store.setBool('autoConnect', v);
+                setState(() {});
+              }),
+        ),
+        STile(
+          icon: Icons.public_rounded,
+          iconColor: const Color(0xFF00A3BF),
+          title: 'انتخاب سرور دلخواه',
+          subtitle: _serverLabel(),
+          onTap: () async {
+            await Navigator.push(context, adaptiveRoute((_) => const LocationsPage()));
+            if (mounted) setState(() {});
+          },
+        ),
+      ]),
+      const SSection('عمومی'),
+      SCard(children: [
+        STile(
+          icon: Icons.contrast_rounded,
+          iconColor: const Color(0xFF00A3BF),
+          title: 'ظاهر',
+          value: _themeLabel(),
+          onTap: _pickTheme,
+        ),
+        STile(
+          icon: Icons.notifications_rounded,
+          iconColor: const Color(0xFFFFA726),
+          title: 'اعلان اتصال',
+          trailing: SToggle(
+              value: Store.getBool('notif', true),
+              onChanged: (v) async {
+                await Store.setBool('notif', v);
+                setState(() {});
+              }),
+        ),
+        STile(
+          icon: Icons.system_update_rounded,
+          iconColor: const Color(0xFF5B5FE6),
+          title: 'به‌روزرسانی',
+          subtitle: 'Update',
+          onTap: () => Navigator.push(context, adaptiveRoute((_) => const UpdatePage())),
+        ),
+        STile(
+          icon: Icons.tune_rounded,
+          iconColor: const Color(0xFF8E8E93),
+          title: 'تنظیمات پیشرفته',
+          onTap: () => Navigator.push(context, adaptiveRoute((_) => const AdvancedPage())),
+        ),
+      ]),
+    ]);
   }
 }
 
@@ -1954,12 +2378,12 @@ class AdvancedPage extends StatefulWidget {
 }
 
 class _AdvancedPageState extends State<AdvancedPage> {
-  Widget _sw(IconData ic, Color col, String t, String sub, String key, bool def) => Tile(
+  Widget _sw(IconData ic, Color col, String t, String sub, String key, bool def) => STile(
         icon: ic,
         iconColor: col,
         title: t,
         subtitle: sub,
-        trailing: Toggle(
+        trailing: SToggle(
             value: Store.getBool(key, def),
             onChanged: (v) async {
               await Store.setBool(key, v);
@@ -2035,42 +2459,178 @@ class _AdvancedPageState extends State<AdvancedPage> {
     );
   }
 
+  static const List<String> _offLabels = ['خاموش', '۱ ساعت', '۲ ساعت', '۴ ساعت', '۸ ساعت', '۱۲ ساعت'];
+  static const List<int> _offValues = [0, 1, 2, 4, 8, 12];
+  static const List<String> _remindLabels = ['خاموش', '۱ ساعت', '۲ ساعت', '۴ ساعت', '۶ ساعت'];
+  static const List<int> _remindValues = [0, 1, 2, 4, 6];
+  static const List<String> _capLabels = ['خاموش', '۱ گیگابایت', '۵ گیگابایت', '۱۰ گیگابایت', '۲۰ گیگابایت', '۵۰ گیگابایت'];
+  static const List<int> _capValues = [0, 1, 5, 10, 20, 50];
+  static const List<String> _dnsLabels = ['پیش‌فرض', 'Cloudflare (1.1.1.1)', 'Google (8.8.8.8)', 'Quad9 (9.9.9.9)', 'AdGuard (ضد تبلیغ)'];
+  static const List<int> _dnsValues = [0, 1, 2, 3, 4];
+  static const List<String> _alertLabels = ['خاموش', '۵۰۰ مگابایت', '۱ گیگابایت', '۲ گیگابایت', '۵ گیگابایت', '۱۰ گیگابایت'];
+  static const List<int> _alertValues = [0, 500, 1024, 2048, 5120, 10240];
+
+  String _labelOf(List<String> labels, List<int> values, int cur) {
+    final i = values.indexOf(cur);
+    return i < 0 ? labels.first : labels[i];
+  }
+
+  void _pick(String title, List<String> labels, List<int> values, int current, Future<void> Function(int) onPick) {
+    final p = P.of(context);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: p.card,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 14, 8, 10),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text(title, style: TextStyle(color: p.text, fontSize: 17, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 8),
+              for (var i = 0; i < labels.length; i++)
+                STile(
+                  icon: values[i] == current ? Icons.check_rounded : Icons.circle_outlined,
+                  iconColor: values[i] == current ? const Color(0xFF30D158) : p.sub,
+                  title: labels[i],
+                  onTap: () async {
+                    await onPick(values[i]);
+                    if (ctx.mounted) Navigator.pop(ctx);
+                    if (mounted) setState(() {});
+                  },
+                ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _copyDiag() async {
+    final up = Store.statUp, down = Store.statDown;
+    final txt = [
+      'NEXORA $kAppVersion',
+      'platform: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}',
+      'device: ${Store.deviceId}',
+      'sessions: ${Store.statSessions}  traffic: ${fmtBytes(up + down)}',
+      'autoOff: ${Store.autoOffHours}h  usageAlert: ${Store.usageAlertMb}MB  confirmDisconnect: ${Store.confirmDisconnect}',
+      'upstream: ${Store.upstreamProxyEnabled}  lite: ${Store.lite.value}',
+    ].join('\n');
+    await Clipboard.setData(ClipboardData(text: txt));
+    if (mounted) snack(context, 'گزارش تشخیصی کپی شد');
+  }
+
   @override
   Widget build(BuildContext context) {
-    return SubPage(title: 'تنظیمات پیشرفته', icon: Icons.settings_rounded, children: [
-      Group(children: [
-        Tile(
-          icon: Icons.palette_rounded,
-          iconColor: Colors.pinkAccent,
-          title: 'تم برنامه',
-          subtitle: 'تغییر ظاهر برنامه',
-          trailing: const Chevron(),
-          onTap: () {
-            final m = Store.themeMode.value;
-            Store.setTheme(m == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark);
-          },
-        ),
+    return SettingsScaffold(title: 'تنظیمات پیشرفته', children: [
+      const SSection('اتصال و امنیت'),
+      SCard(children: [
         _sw(Icons.security_rounded, Colors.amberAccent, 'حالت ضد فیلترینگ شدید (Stealth Fragment)', 'تکه‌تکه کردن پکت‌های TLS برای عبور از سد همراه اول و ایرانسل', 'stealth_fragment', true),
         _sw(Icons.access_time_filled_rounded, const Color(0xFF29E07F), 'همگام‌سازی خودکار منطقه زمانی ویندوز (Auto-Timezone)', 'تنظیم خودکار ساعت ویندوز با لوکیشن سرور برای دور زدن فیلترهای ضد تقلب آمازون و جمینای', 'auto_timezone_sync', true),
-        Tile(
+        STile(
           icon: Icons.alt_route_rounded,
           iconColor: const Color(0xFF33B5FF),
           title: 'پروکسی زنجیره‌ای مسکونی (Residential Upstream)',
           subtitle: Store.upstreamProxyEnabled && Store.upstreamProxy.isNotEmpty
               ? 'فعال: ${Store.upstreamProxy}'
               : 'اتصال خروجی به آی‌پی خانگی/تمیز برای ثبت‌نام آمازون و پی‌پال',
-          trailing: const Chevron(),
           onTap: () => _editUpstreamProxy(context),
         ),
-        _sw(Icons.settings_rounded, Colors.tealAccent, 'تنظیمات سیستم', 'هماهنگ با تنظیمات دستگاه', 'system', true),
-        _sw(Icons.battery_charging_full_rounded, const Color(0xFF29E07F), 'حالت صرفه‌جویی در مصرف باتری', 'کاهش مصرف انرژی', 'battery', false),
-        _sw(Icons.notifications_active_rounded, Colors.lightBlueAccent, 'نمایش اعلان‌های پیشرفته', 'اطلاع از وضعیت اتصال و خطاها', 'advNotif', true),
-        Tile(
+        STile(
+          icon: Icons.timer_off_rounded,
+          iconColor: const Color(0xFFFF6B6B),
+          title: 'قطع خودکار اتصال',
+          subtitle: 'بعد از این مدت، اتصال خودش قطع می‌شود',
+          value: _labelOf(_offLabels, _offValues, Store.autoOffHours),
+          onTap: () => _pick('قطع خودکار اتصال', _offLabels, _offValues, Store.autoOffHours, (v) => Store.setInt('auto_off_h', v)),
+        ),
+        _sw(Icons.front_hand_rounded, const Color(0xFFFFA726), 'تأیید قبل از قطع اتصال', 'با لمس دکمه‌ی خانه، قبل از قطع یک بار می‌پرسد (جلوگیری از قطع اتفاقی)', 'confirm_disconnect', false),
+      ]),
+      const SSection('شبکه و ترافیک (تخصصی)'),
+      SCard(children: [
+        STile(
+          icon: Icons.dns_rounded,
+          iconColor: const Color(0xFF33B5FF),
+          title: 'سرور DNS',
+          subtitle: 'DNS ترجیحی هنگام اتصال؛ AdGuard تبلیغات و ردیاب‌ها را هم می‌بندد',
+          value: _labelOf(_dnsLabels, _dnsValues, Store.getInt('dns_choice', 0)),
+          onTap: () => _pick('سرور DNS', _dnsLabels, _dnsValues, Store.getInt('dns_choice', 0), (v) => Store.setInt('dns_choice', v)),
+        ),
+        _sw(Icons.block_rounded, const Color(0xFFE5484D), 'مسدود کردن QUIC (UDP 443)', 'ترافیک QUIC بسته می‌شود تا برنامه‌ها به TCP برگردند؛ برای سرورهایی که UDP را کند یا قطع می‌کنند', 'block_quic', false),
+        _sw(Icons.downloading_rounded, const Color(0xFFFFA726), 'مسدود کردن تورنت', 'ترافیک BitTorrent از مسیر VPN رد نمی‌شود', 'block_torrent', false),
+        _sw(Icons.shield_rounded, const Color(0xFF14B87D), 'جلوگیری از نشت IP در WebRTC', 'بستن درگاه‌های STUN/TURN تا آی‌پی واقعی از مرورگر لو نرود', 'block_stun', true),
+        _sw(Icons.merge_type_rounded, const Color(0xFF8E5BFF), 'ترکیب اتصال‌ها (Mux)', 'چند اتصال روی یک تونل؛ اتصال اولیه‌ی سایت‌ها سریع‌تر می‌شود (برای کانفیگ‌های Vision خودکار رد می‌شود)', 'mux_on', false),
+      ]),
+      const SSection('مصرف و هشدار'),
+      SCard(children: [
+        STile(
+          icon: Icons.data_usage_rounded,
+          iconColor: const Color(0xFFFFA726),
+          title: 'هشدار مصرف هر اتصال',
+          subtitle: 'وقتی مصرف همین اتصال به این حد رسید، در صفحه‌ی خانه خبر می‌دهد',
+          value: _labelOf(_alertLabels, _alertValues, Store.usageAlertMb),
+          onTap: () => _pick('هشدار مصرف هر اتصال', _alertLabels, _alertValues, Store.usageAlertMb, (v) => Store.setInt('usage_alert_mb', v)),
+        ),
+        STile(
+          icon: Icons.notifications_active_rounded,
+          iconColor: const Color(0xFFFFA726),
+          title: 'یادآوری اتصال طولانی',
+          subtitle: 'اگر مدت زیادی وصل بودی در صفحه‌ی خانه یادآوری می‌کند',
+          value: _labelOf(_remindLabels, _remindValues, Store.getInt('remind_h', 0)),
+          onTap: () => _pick('یادآوری اتصال طولانی', _remindLabels, _remindValues, Store.getInt('remind_h', 0), (v) => Store.setInt('remind_h', v)),
+        ),
+        STile(
+          icon: Icons.donut_large_rounded,
+          iconColor: const Color(0xFFE5484D),
+          title: 'سقف مصرف کل این دستگاه',
+          subtitle: 'وقتی مصرف کل (از آخرین پاک‌سازی آمار) به این حد برسد خبر می‌دهد',
+          value: _labelOf(_capLabels, _capValues, Store.getInt('total_cap_gb', 0)),
+          onTap: () => _pick('سقف مصرف کل', _capLabels, _capValues, Store.getInt('total_cap_gb', 0), (v) => Store.setInt('total_cap_gb', v)),
+        ),
+        STile(
+          icon: Icons.event_repeat_rounded,
+          iconColor: const Color(0xFF14B87D),
+          title: 'صفر شدن ماهانه‌ی آمار',
+          subtitle: 'هر ۳۰ روز آمار این دستگاه خودکار صفر می‌شود',
+          trailing: SToggle(
+              value: Store.getBool('monthly_reset', false),
+              onChanged: (v) async {
+                await Store.setBool('monthly_reset', v);
+                if (v) await Store.setInt('st_reset_at', DateTime.now().millisecondsSinceEpoch);
+                if (mounted) setState(() {});
+              }),
+        ),
+        STile(
+          icon: Icons.insights_rounded,
+          iconColor: const Color(0xFF8E5BFF),
+          title: 'آمار مصرف این دستگاه',
+          subtitle: '${fmtBytes(Store.statUp + Store.statDown)} در ${Store.statSessions} اتصال',
+          onTap: () async {
+            await Navigator.push(context, adaptiveRoute((_) => const ProfilePage()));
+            if (mounted) setState(() {});
+          },
+        ),
+      ]),
+      const SSection('ظاهر و عملکرد'),
+      SCard(children: [
+        _sw(Icons.vibration_rounded, const Color(0xFF8E5BFF), 'لرزش هنگام اتصال و قطع', 'با وصل یا قطع شدن VPN، دستگاه یک بار می‌لرزد (موبایل)', 'haptic', true),
+        _sw(Icons.speed_rounded, const Color(0xFF33B5FF), 'نمایش کارت سرعت در خانه', 'کارت زنده‌ی آپلود و دانلود زیر دکمه‌ی اتصال', 'show_traffic', true),
+        STile(
+          icon: Icons.palette_rounded,
+          iconColor: Colors.pinkAccent,
+          title: 'تم برنامه',
+          subtitle: 'تغییر ظاهر برنامه',
+          onTap: () {
+            final m = Store.themeMode.value;
+            Store.setTheme(m == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark);
+          },
+        ),
+        STile(
           icon: Icons.speed_rounded,
           iconColor: const Color(0xFF29E07F),
           title: 'بهینه‌سازی برنامه',
           subtitle: 'کاهش افکت‌ها و پاک‌سازی حافظه برای روانی بیشتر',
-          trailing: Toggle(
+          trailing: SToggle(
               value: Store.lite.value,
               onChanged: (v) async {
                 await Store.setLite(v);
@@ -2079,23 +2639,44 @@ class _AdvancedPageState extends State<AdvancedPage> {
                 if (mounted) setState(() {});
               }),
         ),
-        Tile(
+        _sw(Icons.settings_rounded, Colors.tealAccent, 'تنظیمات سیستم', 'هماهنگ با تنظیمات دستگاه', 'system', true),
+        _sw(Icons.battery_charging_full_rounded, const Color(0xFF29E07F), 'حالت صرفه‌جویی در مصرف باتری', 'کاهش مصرف انرژی', 'battery', false),
+      ]),
+      const SSection('اعلان‌ها'),
+      SCard(children: [
+        _sw(Icons.notifications_active_rounded, Colors.lightBlueAccent, 'نمایش اعلان‌های پیشرفته', 'اطلاع از وضعیت اتصال و خطاها', 'advNotif', true),
+      ]),
+      const SSection('بکاپ و داده‌ها'),
+      SCard(children: [
+        STile(
+          icon: Icons.lock_rounded,
+          iconColor: const Color(0xFF14B87D),
+          title: 'گاوصندوق NEXORA (بکاپ تنظیمات)',
+          subtitle: 'کد بکاپ را در پروفایل ببین و کپی کن',
+          onTap: () => Navigator.push(context, adaptiveRoute((_) => const ProfilePage())),
+        ),
+        STile(
+          icon: Icons.bug_report_rounded,
+          iconColor: const Color(0xFF5B5FE6),
+          title: 'کپی گزارش تشخیصی',
+          subtitle: 'نسخه، پلتفرم و تنظیمات برای ارسال به پشتیبانی',
+          onTap: _copyDiag,
+        ),
+        STile(
           icon: Icons.delete_rounded,
           iconColor: Colors.redAccent,
           title: 'پاک کردن کش',
           subtitle: 'حذف فایل‌های موقت',
-          trailing: const Chevron(),
           onTap: () async {
             await Store.clearCache();
             if (context.mounted) snack(context, 'کش پاک شد');
           },
         ),
-        Tile(
+        STile(
           icon: Icons.refresh_rounded,
           iconColor: Colors.lightBlueAccent,
           title: 'بازنشانی تنظیمات',
-          subtitle: 'بازگردانی تنظیمات پیش‌فرض',
-          trailing: const Chevron(),
+          subtitle: 'بازگردانی تنظیمات پیش‌فرض (نام و آمار پروفایل پاک نمی‌شود)',
           onTap: () async {
             await Store.resetSettings();
             if (mounted) setState(() {});
@@ -2124,7 +2705,7 @@ class InfoPage extends StatelessWidget {
             const SizedBox(height: 10),
             Text('NEXORA VPN', style: TextStyle(color: p.text, fontSize: 28, fontWeight: FontWeight.w700)),
             const SizedBox(height: 2),
-            Text('Version 1.0.0', style: TextStyle(color: p.sub, fontSize: 13)),
+            Text('Version 1.0.2', style: TextStyle(color: p.sub, fontSize: 13)),
           ]),
         ),
         const SizedBox(height: 18),
@@ -2149,7 +2730,7 @@ class InfoPage extends StatelessWidget {
             ]),
             const SizedBox(height: 10),
             Text(
-                'ما هیچ‌گونه اطلاعات شخصی شما (مانند نام، شماره تلفن یا ایمیل) را ذخیره نمی‌کنیم. تنها اطلاعات مورد نیاز برای اتصال به سرورهای ما ارسال می‌شود و پس از پایان اتصال، هیچ اطلاعاتی نگهداری نمی‌شود.',
+                'ما اطلاعات شخصی شما (مانند نام، شماره تلفن یا ایمیل) را جمع‌آوری نمی‌کنیم. نوع اتصال سعی می‌کنیم بسیار رمزنگاری شود. فقط اطلاعات فنی محدود برای پایداری و رفع خطا استفاده می‌شود.',
                 style: TextStyle(color: p.text, height: 1.9, fontSize: 12.5)),
             const SizedBox(height: 10),
             Text('از آنجا که این نسخه بتا است و وبسایت رسمی نداریم، ممکن است در آینده جزئیات بیشتری ارائه شود.',
@@ -2237,20 +2818,98 @@ class PrivacyPage extends StatelessWidget {
               color: p.accent2.withOpacity(0.10),
               border: Border.all(color: p.accent2.withOpacity(0.35)),
             ),
-            child: Text('Version 1.0.0', style: TextStyle(color: p.accent2, fontSize: 12.5, fontWeight: FontWeight.w700)),
+            child: Text('Version 1.0.2', style: TextStyle(color: p.accent2, fontSize: 12.5, fontWeight: FontWeight.w700)),
           ),
         ),
       ),
       Panel(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('ما در NEXORA VPN به حریم خصوصی شما بسیار اهمیت می‌دهیم. به همین دلیل:', style: TextStyle(color: p.text, height: 1.8, fontSize: 14)),
-          const SizedBox(height: 6),
-          item('هیچ‌گونه اطلاعات شخصی مانند نام، شماره تلفن، ایمیل یا پیام‌های شما را ذخیره نمی‌کنیم.'),
-          item('تنها اطلاعات فنی لازم برای اتصال (مانند IP شما، حجم مصرفی و زمان اتصال) به سرورهای ما ارسال می‌شود.'),
-          item('این اطلاعات صرفا برای بهبود عملکرد و مدیریت سرورها استفاده شده و پس از پایان اتصال حذف می‌شود.'),
-          item('به دلیل اینکه این نسخه بتا است و وبسایت رسمی نداریم، ممکن است در آینده سیاست حریم خصوصی به‌روزرسانی شود.'),
+          Text('سیاست حریم خصوصی', style: TextStyle(color: p.accent2, fontSize: 17, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 8),
+          Text('مقدمه', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 4),
+          Text('ما در NEXORA VPN به حریم خصوصی شما اهمیت می‌دهیم و تلاش می‌کنیم فقط کمترین اطلاعات فنیِ لازم برای کارکرد برنامه را استفاده کنیم. این متن توضیح می‌دهد برنامه چه اطلاعاتی را به‌کار می‌برد و چه اطلاعاتی را جمع‌آوری نمی‌کند. استفاده از برنامه به معنای پذیرش این سیاست است.', style: TextStyle(color: p.text, height: 1.9, fontSize: 13)),
+          const SizedBox(height: 12),
+          Text('اطلاعاتی که جمع‌آوری نمی‌کنیم', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 4),
+          Text('ما نام، شماره تلفن، ایمیل، پیام‌ها، تاریخچه‌ی مرور، محتوای سایت‌هایی که باز می‌کنید و رمزهای عبور شما را نمی‌خوانیم و ذخیره نمی‌کنیم. برنامه برای ثبت‌نام به حساب کاربری شخصی نیاز ندارد و نام نمایشی که انتخاب می‌کنید فقط روی دستگاه خودتان نگهداری می‌شود.', style: TextStyle(color: p.text, height: 1.9, fontSize: 13)),
+          const SizedBox(height: 12),
+          Text('نوع اتصال', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 4),
+          Text('نوع اتصال سعی می‌کنیم بسیار رمزنگاری شود.', style: TextStyle(color: p.text, height: 1.9, fontSize: 13)),
+          const SizedBox(height: 12),
+          Text('اطلاعات فنی', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 4),
+          Text('برای اینکه سرویس پایدار بماند، ممکن است اطلاعات فنی عمومی مانند شناسه‌ی ناشناس دستگاه، نوع سیستم‌عامل، نسخه‌ی برنامه، کشور سرور انتخاب‌شده، زمان و مدت اتصال و گزارش‌های فنی خطا ثبت شود. این اطلاعات هویت شما را مشخص نمی‌کند و فقط برای پایش کیفیت سرورها، رفع اشکال و بهبود برنامه استفاده می‌شود.', style: TextStyle(color: p.text, height: 1.9, fontSize: 13)),
+          const SizedBox(height: 12),
+          Text('پیام‌های خطا', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 4),
+          Text('اگر اتصال برقرار نشود یا مشکلی پیش بیاید، به شما فقط یک پیام ساده نشان داده می‌شود. جزئیات فنیِ آن مشکل به‌صورت خودکار و بدون اطلاعات شخصی برای تیم فنی ارسال می‌شود تا بتوانیم آن را سریع‌تر برطرف کنیم.', style: TextStyle(color: p.text, height: 1.9, fontSize: 13)),
+          const SizedBox(height: 12),
+          Text('اشتراک‌گذاری با دیگران', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 4),
+          Text('ما اطلاعات شما را نمی‌فروشیم و برای تبلیغات در اختیار شخص ثالث قرار نمی‌دهیم. اطلاعات فنیِ محدود فقط در صورتِ الزام قانونی یا برای حفظ امنیت سرویس ممکن است بررسی شود.', style: TextStyle(color: p.text, height: 1.9, fontSize: 13)),
+          const SizedBox(height: 12),
+          Text('امنیت داده‌ها', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 4),
+          Text('تلاش می‌کنیم ارتباط برنامه با سرورها رمزنگاری‌شده باشد و دسترسی به اطلاعات فنی فقط برای مدیران سرویس باشد. با این حال هیچ سیستمی صددرصد بدون ریسک نیست و ما نمی‌توانیم امنیت مطلق را تضمین کنیم.', style: TextStyle(color: p.text, height: 1.9, fontSize: 13)),
+          const SizedBox(height: 12),
+          Text('مسئولیت کاربر', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 4),
+          Text('لطفاً از برنامه مطابق قوانین کشور خود و برای اهداف قانونی استفاده کنید. حفظ امنیت دستگاه و به‌روز نگه‌داشتن برنامه بر عهده‌ی شماست.', style: TextStyle(color: p.text, height: 1.9, fontSize: 13)),
+          const SizedBox(height: 12),
+          Text('تغییر این سیاست', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 4),
+          Text('چون این نسخه بتا است و وبسایت رسمی نداریم، ممکن است این سیاست در آینده به‌روزرسانی شود. نسخه‌ی جدید داخل همین صفحه نمایش داده می‌شود.', style: TextStyle(color: p.text, height: 1.9, fontSize: 13)),
+          const SizedBox(height: 12),
         ]),
+      ),
+      Panel(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Privacy Policy', style: TextStyle(color: p.accent2, fontSize: 17, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 8),
+            Text('Introduction', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text('At NEXORA VPN we care about your privacy and try to use only the minimum technical information needed for the app to work. This page explains what the app uses and what it does not collect. By using the app you accept this policy.', style: TextStyle(color: p.text, height: 1.7, fontSize: 13)),
+            const SizedBox(height: 12),
+            Text('What we do not collect', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text('We do not read or store your name, phone number, email, messages, browsing history, the content of the sites you open, or your passwords. The app does not require a personal account, and the display name you choose is kept only on your own device.', style: TextStyle(color: p.text, height: 1.7, fontSize: 13)),
+            const SizedBox(height: 12),
+            Text('Connection type', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text('We try to make the connection type highly encrypted.', style: TextStyle(color: p.text, height: 1.7, fontSize: 13)),
+            const SizedBox(height: 12),
+            Text('Technical information', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text('This open-source build does not record or send usage statistics, device identifiers or error reports to any server. The only network requests it makes besides your VPN traffic are the update check on GitHub and public IP/location lookup services used to show your connection location.', style: TextStyle(color: p.text, height: 1.7, fontSize: 13)),
+            const SizedBox(height: 12),
+            Text('Error messages', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text('If a connection fails or something goes wrong, you only see a simple message on your screen. Nothing is sent anywhere.', style: TextStyle(color: p.text, height: 1.7, fontSize: 13)),
+            const SizedBox(height: 12),
+            Text('Sharing with others', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text('We do not sell your information and do not share it with third parties. The project has no server that collects your data.', style: TextStyle(color: p.text, height: 1.7, fontSize: 13)),
+            const SizedBox(height: 12),
+            Text('Data security', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text('Your settings and personal servers are stored only on your device. No system is completely risk-free, so keep your device secure and the app up to date.', style: TextStyle(color: p.text, height: 1.7, fontSize: 13)),
+            const SizedBox(height: 12),
+            Text('User responsibility', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text('Please use the app in accordance with the laws of your country and for lawful purposes. Keeping your device secure and the app up to date is your responsibility.', style: TextStyle(color: p.text, height: 1.7, fontSize: 13)),
+            const SizedBox(height: 12),
+            Text('Changes to this policy', style: TextStyle(color: p.text, fontSize: 14.5, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text('Because this is a beta version and we have no official website, this policy may be updated in the future. The latest version will be shown on this page.', style: TextStyle(color: p.text, height: 1.7, fontSize: 13)),
+            const SizedBox(height: 12),
+          ]),
+        ),
       ),
       Panel(
         tint: const Color(0xFF1B3FA0),
@@ -2349,4 +3008,285 @@ class ConnInfoPage extends StatelessWidget {
       },
     );
   }
+}
+
+// ───────────────────────── پروفایل ─────────────────────────
+
+String _profWhen(int ms) {
+  if (ms <= 0) return 'هرگز';
+  final d = DateTime.fromMillisecondsSinceEpoch(ms);
+  String two(int x) => x.toString().padLeft(2, '0');
+  return '${d.year}/${two(d.month)}/${two(d.day)}  ${two(d.hour)}:${two(d.minute)}';
+}
+
+String _profDur(int s) {
+  if (s < 60) return '$s ثانیه';
+  if (s < 3600) return '${s ~/ 60} دقیقه';
+  final h = s ~/ 3600;
+  final m = (s % 3600) ~/ 60;
+  return h >= 48 ? '${h ~/ 24} روز و ${h % 24} ساعت' : '$h ساعت و $m دقیقه';
+}
+
+class ProfilePage extends StatefulWidget {
+  const ProfilePage({super.key});
+
+  @override
+  State<ProfilePage> createState() => _ProfilePageState();
+}
+
+class _ProfilePageState extends State<ProfilePage> {
+  void _editName() {
+    final p = P.of(context);
+    final ctl = TextEditingController(text: Store.userName.value);
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          backgroundColor: p.card,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+          title: Text('نام شما', style: TextStyle(color: p.text, fontSize: 17, fontWeight: FontWeight.w800)),
+          content: TextField(
+            controller: ctl,
+            autofocus: true,
+            maxLength: 24,
+            style: TextStyle(color: p.text, fontSize: 16),
+            decoration: InputDecoration(
+              counterText: '',
+              hintText: 'نام شما',
+              hintStyle: TextStyle(color: p.sub.withOpacity(0.7)),
+              filled: true,
+              fillColor: p.bg,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: Text('انصراف', style: TextStyle(color: p.sub))),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: p.accent),
+              onPressed: () async {
+                if (ctl.text.trim().isNotEmpty) await Store.setUserName(ctl.text);
+                if (ctx.mounted) Navigator.pop(ctx);
+              },
+              child: const Text('ذخیره'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmClearStats() async {
+    final p = P.of(context);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          backgroundColor: p.card,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+          title: Text('پاک کردن آمار؟', style: TextStyle(color: p.text, fontSize: 17, fontWeight: FontWeight.w800)),
+          content: Text('آمار روی همین دستگاه صفر می‌شود.', style: TextStyle(color: p.sub, fontSize: 14, height: 1.6)),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text('انصراف', style: TextStyle(color: p.sub))),
+            FilledButton(style: FilledButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () => Navigator.pop(ctx, true), child: const Text('پاک کن')),
+          ],
+        ),
+      ),
+    );
+    if (ok == true) {
+      await Store.clearUsageStats();
+      if (mounted) setState(() {});
+    }
+  }
+
+  Widget _header(P p) => ValueListenableBuilder<String>(
+        valueListenable: Store.userName,
+        builder: (context, name, _) {
+          return SCard(children: [
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: _editName,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 18, 16, 18),
+                  child: Directionality(
+                    textDirection: TextDirection.rtl,
+                    child: Row(children: [
+                      Expanded(
+                        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text(name.isEmpty ? 'کاربر NEXORA' : name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.text, fontSize: 21, fontWeight: FontWeight.w800)),
+                          const SizedBox(height: 4),
+                          Text('برای تغییر نام لمس کن', style: TextStyle(color: p.sub, fontSize: 13)),
+                          const SizedBox(height: 3),
+                          Text('ID ${Store.deviceId.substring(0, 8)}  ·  v$kAppVersion', textDirection: TextDirection.ltr, style: TextStyle(color: p.accent2, fontSize: 12.5, fontWeight: FontWeight.w700)),
+                        ]),
+                      ),
+                      Icon(Icons.edit_rounded, color: p.sub, size: 22),
+                    ]),
+                  ),
+                ),
+              ),
+            ),
+          ]);
+        },
+      );
+
+  Widget _stats(P p) => ValueListenableBuilder<VpnStatus>(
+        valueListenable: VpnService.I.status,
+        builder: (context, st, _) {
+          final live = st.phase == Phase.on;
+          final up = Store.statUp + (live ? st.up : 0);
+          final down = Store.statDown + (live ? st.down : 0);
+          final secs = Store.statSeconds + (live ? st.seconds : 0);
+          final sessions = Store.statSessions + (live ? 1 : 0);
+          final avg = sessions > 0 ? (up + down) ~/ sessions : 0;
+          return SCard(children: [
+            STile(icon: Icons.data_usage_rounded, iconColor: const Color(0xFFFFA726), title: 'مصرف کل', value: fmtBytes(up + down)),
+            STile(icon: Icons.arrow_upward_rounded, iconColor: const Color(0xFF30D158), title: 'آپلود', value: fmtBytes(up)),
+            STile(icon: Icons.arrow_downward_rounded, iconColor: const Color(0xFF33B5FF), title: 'دانلود', value: fmtBytes(down)),
+            STile(icon: Icons.timer_rounded, iconColor: const Color(0xFF8E5BFF), title: 'مجموع زمان اتصال', value: _profDur(secs)),
+            STile(icon: Icons.link_rounded, iconColor: const Color(0xFF00A3BF), title: 'تعداد اتصال', value: '$sessions'),
+            STile(icon: Icons.calculate_rounded, iconColor: const Color(0xFF5B5FE6), title: 'میانگین مصرف هر اتصال', value: fmtBytes(avg)),
+            STile(icon: Icons.emoji_events_rounded, iconColor: const Color(0xFFFF4FA3), title: 'بیشترین مصرف در یک اتصال', value: fmtBytes(Store.statMaxSession)),
+            STile(icon: Icons.restart_alt_rounded, iconColor: Colors.redAccent, title: 'پاک کردن آمار این دستگاه', onTap: _confirmClearStats),
+          ]);
+        },
+      );
+
+  Widget _personal(P p) => SCard(children: [
+        STile(
+          icon: Icons.badge_rounded,
+          iconColor: const Color(0xFF3D7BFF),
+          title: 'نام نمایشی',
+          value: Store.userName.value.isEmpty ? 'تنظیم نشده' : Store.userName.value,
+          onTap: _editName,
+        ),
+      ]);
+
+  Widget _device(P p) => SCard(children: [
+        STile(
+          icon: Icons.fingerprint_rounded,
+          iconColor: const Color(0xFF8E5BFF),
+          title: 'شناسه‌ی دستگاه',
+          subtitle: 'برای پیگیری مشکل با پشتیبانی؛ لمس کن تا کپی شود',
+          value: Store.deviceId.substring(0, 10),
+          onTap: () {
+            Clipboard.setData(ClipboardData(text: Store.deviceId));
+            snack(context, 'شناسه‌ی دستگاه کپی شد');
+          },
+        ),
+        STile(icon: Icons.devices_rounded, iconColor: const Color(0xFF3D7BFF), title: 'پلتفرم', value: Platform.operatingSystem),
+        STile(icon: Icons.info_rounded, iconColor: const Color(0xFF5B5FE6), title: 'نسخه‌ی برنامه', value: kAppVersion),
+        STile(icon: Icons.event_rounded, iconColor: const Color(0xFF14B87D), title: 'تاریخ شروع استفاده', value: _profWhen(Store.installAt)),
+      ]);
+
+  @override
+  Widget build(BuildContext context) {
+    final p = P.of(context);
+    return SettingsScaffold(title: 'پروفایل', children: [
+      _header(p),
+      const SSection('آمار مصرف روی این دستگاه'),
+      _stats(p),
+      const SSection('شخصی‌سازی'),
+      _personal(p),
+      const SSection('اطلاعات دستگاه'),
+      _device(p),
+    ]);
+  }
+}
+
+class _PingCtl {
+  bool cancelRequested = false;
+  final ValueNotifier<int> total = ValueNotifier<int>(0);
+  final Completer<void> _c = Completer<void>();
+  Future<void> get cancelled => _c.future;
+  String code = '';
+  String name = '';
+  String sub = '';
+  void addPing(Object _) {}
+  void cancel() {
+    cancelRequested = true;
+    if (!_c.isCompleted) _c.complete();
+  }
+}
+
+_PingCtl? _activePing;
+
+Future<String?> _runPingTest(BuildContext context, Future<String?> Function(_PingCtl ctl) test, String Function(String) errText) async {
+  final ctl = _PingCtl();
+  _activePing = ctl;
+  try {
+    return await Future.any<String?>([test(ctl), ctl.cancelled.then<String?>((_) => 'cancelled')]);
+  } finally {
+    if (identical(_activePing, ctl)) _activePing = null;
+  }
+}
+
+class PingSpinner extends StatefulWidget {
+  const PingSpinner({super.key});
+
+  @override
+  State<PingSpinner> createState() => _PingSpinnerState();
+}
+
+class _PingSpinnerState extends State<PingSpinner> with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(vsync: this, duration: const Duration(milliseconds: 900))..repeat();
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: SizedBox(
+        width: 24,
+        height: 24,
+        child: AnimatedBuilder(
+          animation: _c,
+          builder: (_, __) => CustomPaint(painter: _SpinPainter(_c.value)),
+        ),
+      ),
+    );
+  }
+}
+
+const Color _spinGreen = Color(0xFF29E07F);
+
+class _SpinPainter extends CustomPainter {
+  final double t;
+  _SpinPainter(this.t);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final r = Rect.fromLTWH(2.5, 2.5, size.width - 5, size.height - 5);
+    final track = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.6
+      ..color = _spinGreen.withOpacity(0.15);
+    canvas.drawArc(r, 0, 6.2832, false, track);
+    final a = t * 6.2832;
+    final arc = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = 2.8
+      ..shader = SweepGradient(
+        startAngle: 0,
+        endAngle: 6.2832,
+        colors: [_spinGreen.withOpacity(0), _spinGreen],
+        transform: GradientRotation(a - 1.9),
+      ).createShader(r);
+    canvas.drawArc(r, a - 1.9, 1.9, false, arc);
+    final c = r.center;
+    final rad = r.width / 2;
+    final head = Offset(c.dx + rad * math.cos(a), c.dy + rad * math.sin(a));
+    canvas.drawCircle(head, 3.4, Paint()..color = _spinGreen.withOpacity(0.35)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3));
+    canvas.drawCircle(head, 2.1, Paint()..color = Colors.white);
+  }
+
+  @override
+  bool shouldRepaint(_SpinPainter o) => o.t != t;
 }

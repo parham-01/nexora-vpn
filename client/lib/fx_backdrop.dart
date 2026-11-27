@@ -149,9 +149,7 @@ class _FxPainter extends CustomPainter {
     _ribbons(canvas, w, h, t, k);
     if (!lite) _grid(canvas, w, h, t, k);
     _orbits(canvas, w, h, t, k);
-    _embersLayer(canvas, w, h, t, k);
     _scan(canvas, w, h, t, k);
-    _sparks(canvas, w, h, t, k);
   }
 
   // پایه: گرادیان تیره/روشن

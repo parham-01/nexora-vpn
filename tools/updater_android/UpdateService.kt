@@ -78,6 +78,7 @@ class UpdateService : Service() {
         @Volatile var running = false
         @Volatile var cancelRequested = false
         const val CHANNEL = "nexora_update"
+        const val CHANNEL_DONE = "nexora_update_done"
         const val ID_PROGRESS = 7341
         const val ID_DONE = 7342
         const val EXTRA_URL = "url"
@@ -126,6 +127,11 @@ class UpdateService : Service() {
                     NotificationChannel(CHANNEL, "App update", NotificationManager.IMPORTANCE_LOW)
                 )
             }
+            if (nm.getNotificationChannel(CHANNEL_DONE) == null) {
+                nm.createNotificationChannel(
+                    NotificationChannel(CHANNEL_DONE, "Update finished", NotificationManager.IMPORTANCE_HIGH)
+                )
+            }
         }
     }
 
@@ -158,10 +164,12 @@ class UpdateService : Service() {
 
     private fun notifyFinal(title: String, text: String) {
         val nm = getSystemService(NotificationManager::class.java)
-        val n = builder()
+        val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL_DONE) else Notification.Builder(this)
+        val n = b
             .setSmallIcon(smallIcon())
             .setContentTitle(title)
             .setContentText(text)
+            .setStyle(Notification.BigTextStyle().bigText(text))
             .setAutoCancel(true)
             .setContentIntent(openAppIntent())
             .build()
@@ -260,7 +268,7 @@ class UpdateService : Service() {
             UpdateState.error = ""
             UpdateState.save(this)
             stopForeground(STOP_FOREGROUND_REMOVE)
-            notifyFinal("Update downloaded", "Open Nexora VPN to install the update")
+            notifyFinal("بروزرسانی تکمیل شد!", "برای نصب نسخه‌ی جدید NEXORA VPN لمس کن")
         } catch (e: InterruptedException) {
             part.delete()
             UpdateState.status = "idle"; UpdateState.received = 0; UpdateState.total = 0
@@ -271,7 +279,7 @@ class UpdateService : Service() {
             UpdateState.error = e.message ?: "download failed"
             UpdateState.save(this)
             stopForeground(STOP_FOREGROUND_REMOVE)
-            notifyFinal("Update failed", "Open Nexora VPN and try again")
+            notifyFinal("بروزرسانی ناموفق بود", "برنامه را باز کن و دوباره تلاش کن")
         } finally {
             try { conn?.disconnect() } catch (e: Exception) {}
             running = false

@@ -350,27 +350,32 @@ class GlobePainter extends CustomPainter {
 
   static final List<List<double>> _stars = () {
     final r = Random(7);
-    return List.generate(24, (_) => [r.nextDouble(), r.nextDouble() * 0.5, r.nextDouble() * 1.1 + 0.3]);
+    return List.generate(36, (_) => [r.nextDouble(), r.nextDouble() * 0.5, r.nextDouble() * 1.1 + 0.3]);
   }();
+
+  // ماسک ساده‌ی «خشکی» با ترکیب موج‌ها (ثابت و قطعی)
+  static bool _land(double psi, double phi) {
+    final v = sin(3.1 * psi + 1.7) * sin(5.0 * phi + 0.6) + 0.6 * sin(7.0 * psi - 2.0 * phi) + 0.35 * sin(11.0 * psi + 4.0 * phi);
+    return v > 0.18;
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
     final glow = on ? const Color(0xFF29E07F) : c;
     final radius = size.width * 0.78;
     final center = Offset(size.width / 2, size.height * 0.55 + radius);
+
+    // هاله‌ی چندلایه‌ی اتمسفر
     if (lite) {
       canvas.drawCircle(center, radius + 10, Paint()..color = glow.withOpacity(0.10)..style = PaintingStyle.stroke..strokeWidth = 16);
       canvas.drawCircle(center, radius + 5, Paint()..color = glow.withOpacity(0.22)..style = PaintingStyle.stroke..strokeWidth = 8);
     } else {
-      canvas.drawCircle(
-          center,
-          radius + 6,
-          Paint()
-            ..color = glow.withOpacity(0.9)
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = 5
-            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 14));
+      canvas.drawCircle(center, radius + 16, Paint()..color = glow.withOpacity(0.35)..style = PaintingStyle.stroke..strokeWidth = 26..maskFilter = const MaskFilter.blur(BlurStyle.normal, 26));
+      canvas.drawCircle(center, radius + 6, Paint()..color = glow.withOpacity(0.9)..style = PaintingStyle.stroke..strokeWidth = 4..maskFilter = const MaskFilter.blur(BlurStyle.normal, 12));
     }
+
+    // بدنه‌ی سیاره
+    final rect = Rect.fromCircle(center: center, radius: radius);
     canvas.drawCircle(
         center,
         radius,
@@ -378,23 +383,55 @@ class GlobePainter extends CustomPainter {
           ..shader = RadialGradient(
             center: const Alignment(0, -1),
             radius: 1.0,
-            colors: [glow.withOpacity(0.55), const Color(0xFF07204F).withOpacity(0.85), const Color(0xFF040A1E)],
-            stops: const [0.0, 0.18, 0.5],
-          ).createShader(Rect.fromCircle(center: center, radius: radius)));
+            colors: [glow.withOpacity(0.50), const Color(0xFF0B2E70).withOpacity(0.92), const Color(0xFF050E2B), const Color(0xFF02040F)],
+            stops: const [0.0, 0.14, 0.40, 0.7],
+          ).createShader(rect));
+
+    // خشکی نقطه‌نقطه روی کره (دید از بالا؛ نقطه‌ها به سمت لبه کوچک می‌شوند)
+    canvas.save();
+    canvas.clipPath(Path()..addOval(rect));
+    final rows = lite ? 14 : 24;
+    final dphi = 0.92 / rows;
+    final landP = Paint()..color = Color.lerp(glow, Colors.white, 0.35)!.withOpacity(0.85);
+    final seaP = Paint()..color = glow.withOpacity(0.22);
+    for (var i = 1; i <= rows; i++) {
+      final phi = i * dphi;
+      final sp = sin(phi);
+      final cols = max(10, (pi * sp / dphi).floor());
+      final dr = max(0.8, (lite ? 1.9 : 1.6) * (1.0 - 0.45 * phi));
+      for (var j = 0; j <= cols; j++) {
+        final psi = pi * (j + 0.5) / (cols + 1);
+        final x = center.dx + radius * sp * cos(psi);
+        final y = center.dy - radius * cos(phi);
+        if (x < -4 || x > size.width + 4 || y > size.height + 4) continue;
+        final fy = sin(psi); // نزدیک لبه‌ی چپ و راست کوچک‌تر
+        final land = _land(psi, phi);
+        canvas.drawCircle(Offset(x, y), dr * (0.55 + 0.45 * fy), land ? landP : seaP);
+      }
+    }
+    // درخشش لبه‌ی بالایی
     canvas.drawCircle(
         center,
         radius,
         Paint()
-          ..shader = LinearGradient(colors: [Colors.white.withOpacity(0.9), glow, glow.withOpacity(0)], begin: Alignment.topCenter, end: Alignment.bottomCenter)
-              .createShader(Rect.fromCircle(center: center, radius: radius))
+          ..shader = RadialGradient(
+            center: const Alignment(0, -1),
+            radius: 1.0,
+            colors: [glow.withOpacity(0.38), glow.withOpacity(0.0)],
+            stops: const [0.0, 0.10],
+          ).createShader(rect));
+    canvas.restore();
+
+    // حلقه‌ی لبه با گرادیان
+    canvas.drawCircle(
+        center,
+        radius,
+        Paint()
+          ..shader = LinearGradient(colors: [Colors.white.withOpacity(0.95), glow, glow.withOpacity(0)], begin: Alignment.topCenter, end: Alignment.bottomCenter)
+              .createShader(rect)
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 2);
-    final sp = Paint()..color = Colors.white.withOpacity(0.55);
-    final n = lite ? 14 : _stars.length;
-    for (var i = 0; i < n; i++) {
-      final s = _stars[i];
-      canvas.drawCircle(Offset(s[0] * size.width, s[1] * size.height), s[2], sp);
-    }
+          ..strokeWidth = 2.2);
+
   }
 
   @override
@@ -412,11 +449,13 @@ class SlideSwitch extends StatefulWidget {
 }
 
 class _SlideSwitchState extends State<SlideSwitch> {
-  static const double w = 196;
-  static const double h = 82;
-  static const double k = 68;
-  static const double maxX = w - k - 14;
+  static const double w = 270;
+  static const double h = 88;
+  static const double k = 76;
+  static const double maxX = w - k - 12;
   static const Color green = Color(0xFF29E07F);
+  static const Color neon = Color(0xFF2F7BFF);
+  static const Color cyan = Color(0xFF52D6FF);
   final ValueNotifier<double> _drag = ValueNotifier(0);
   bool _dragging = false;
 
@@ -426,84 +465,114 @@ class _SlideSwitchState extends State<SlideSwitch> {
     super.dispose();
   }
 
+  Widget _shield(bool on) => Stack(alignment: Alignment.center, children: [
+        Icon(on ? Icons.shield_rounded : Icons.shield_outlined, size: 44, color: Colors.white),
+        if (!on) const Padding(padding: EdgeInsets.only(top: 3), child: Icon(Icons.lock_rounded, size: 17, color: Colors.white)),
+        if (on) const Padding(padding: EdgeInsets.only(top: 1), child: Icon(Icons.check_rounded, size: 24, color: Color(0xFF0B8F52))),
+      ]);
+
   @override
   Widget build(BuildContext context) {
-    final p = P.of(context);
     final on = widget.on;
     final target = on ? 0.0 : maxX;
-    final label = widget.busy ? '...' : (on ? 'ON' : 'OFF');
+    final glow = on ? green : neon;
+    final edge = on ? green : cyan;
     return RepaintBoundary(
       child: Directionality(
         textDirection: TextDirection.ltr,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: widget.busy ? null : () => widget.onChanged(!on),
-          onHorizontalDragStart: (_) {
-            _dragging = true;
-            _drag.value = target;
-          },
-          onHorizontalDragUpdate: (d) => _drag.value = (_drag.value + d.delta.dx).clamp(0.0, maxX),
-          onHorizontalDragEnd: (_) {
-            final wantOn = _drag.value < maxX / 2;
-            setState(() => _dragging = false);
-            if (!widget.busy && wantOn != on) widget.onChanged(wantOn);
-          },
-          onHorizontalDragCancel: () => setState(() => _dragging = false),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 160),
-            width: w,
-            height: h,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(h / 2),
-              gradient: LinearGradient(
-                colors: on
-                    ? const [Color(0xFF0E6B4A), Color(0xFF0B3F5E)]
-                    : const [Color(0xFF3A4768), Color(0xFF1C2744)],
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.busy ? null : () => widget.onChanged(!on),
+            onHorizontalDragStart: (_) {
+              _dragging = true;
+              _drag.value = target;
+            },
+            onHorizontalDragUpdate: (d) => _drag.value = (_drag.value + d.delta.dx).clamp(0.0, maxX),
+            onHorizontalDragEnd: (_) {
+              final wantOn = _drag.value < maxX / 2;
+              setState(() => _dragging = false);
+              if (!widget.busy && wantOn != on) widget.onChanged(wantOn);
+            },
+            onHorizontalDragCancel: () => setState(() => _dragging = false),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              width: w,
+              height: h,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(h / 2),
+                gradient: const LinearGradient(colors: [Color(0xFF0A1646), Color(0xFF050A26)]),
+                border: Border.all(color: edge.withOpacity(0.9), width: 2),
+                boxShadow: [
+                  BoxShadow(color: glow.withOpacity(0.45), blurRadius: 22, spreadRadius: 1),
+                  BoxShadow(color: glow.withOpacity(0.20), blurRadius: 40, spreadRadius: 4),
+                ],
               ),
-              border: Border.all(color: on ? green : const Color(0xFF5E71A0), width: 1.5),
-            ),
-            child: Stack(alignment: Alignment.centerLeft, children: [
-              Positioned.fill(
-                child: Align(
-                  alignment: on ? Alignment.centerRight : Alignment.centerLeft,
+              child: Stack(alignment: Alignment.centerLeft, children: [
+                // خطوط سرعت بین فلش و دکمه
+                Positioned.fill(
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 26),
-                    child: Text(label,
-                        style: TextStyle(
-                            color: on ? Colors.white : const Color(0xFFD6E2FF),
-                            fontSize: 24,
-                            letterSpacing: 1,
-                            fontWeight: FontWeight.w600)),
+                    padding: const EdgeInsets.symmetric(horizontal: 70, vertical: 28),
+                    child: Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+                      for (var i = 0; i < 4; i++)
+                        Container(
+                          height: 2,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(2),
+                            gradient: LinearGradient(colors: [glow.withOpacity(0.0), glow.withOpacity(on ? 0.0 : 0.55)]),
+                          ),
+                        ),
+                    ]),
                   ),
                 ),
-              ),
-              ValueListenableBuilder<double>(
-                valueListenable: _drag,
-                child: Container(
-                  width: k,
-                  height: k,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: const RadialGradient(colors: [Colors.white, Color(0xFFD8E6FF)]),
-                    border: Border.all(color: (on ? green : p.accent2).withOpacity(0.7), width: 2),
+                Positioned.fill(
+                  child: Align(
+                    alignment: on ? Alignment.centerRight : Alignment.centerLeft,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: widget.busy
+                          ? const SizedBox.shrink()
+                          : (on
+                              ? const Text('ON', style: TextStyle(color: Colors.white, fontSize: 22, letterSpacing: 1.5, fontWeight: FontWeight.w700))
+                              : const Icon(Icons.chevron_left_rounded, color: Colors.white, size: 42)),
+                    ),
                   ),
-                  child: widget.busy
-                      ? const RepaintBoundary(child: Padding(padding: EdgeInsets.all(22), child: CircularProgressIndicator(strokeWidth: 3)))
-                      : Icon(Icons.power_settings_new_rounded, size: 40, color: on ? const Color(0xFF14B866) : p.accent),
                 ),
-                builder: (_, v, child) {
-                  final x = _dragging ? v : target;
-                  return AnimatedPositioned(
-                    duration: Duration(milliseconds: _dragging ? 0 : 180),
-                    curve: Curves.easeOutCubic,
-                    left: 7 + x,
-                    child: child!,
-                  );
-                },
-              ),
-            ]),
+                ValueListenableBuilder<double>(
+                  valueListenable: _drag,
+                  child: Container(
+                    width: k,
+                    height: k,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: RadialGradient(
+                        center: const Alignment(-0.25, -0.3),
+                        colors: on ? const [Color(0xFF5BF0A5), Color(0xFF0FA862)] : const [Color(0xFF7FE0FF), Color(0xFF1E6BFF)],
+                      ),
+                      border: Border.all(color: Colors.white.withOpacity(0.85), width: 2.5),
+                      boxShadow: [BoxShadow(color: glow.withOpacity(0.85), blurRadius: 24, spreadRadius: 2)],
+                    ),
+                    child: widget.busy
+                        ? const RepaintBoundary(child: Padding(padding: EdgeInsets.all(24), child: CircularProgressIndicator(strokeWidth: 3, color: Colors.white)))
+                        : _shield(on),
+                  ),
+                  builder: (_, v, child) {
+                    final x = _dragging ? v : target;
+                    return AnimatedPositioned(
+                      duration: Duration(milliseconds: _dragging ? 0 : 180),
+                      curve: Curves.easeOutCubic,
+                      left: 6 + x,
+                      child: child!,
+                    );
+                  },
+                ),
+              ]),
+            ),
           ),
-        ),
+          const SizedBox(height: 12),
+          Text(widget.busy ? 'Connecting...' : (on ? 'Connected' : 'Tap to Connect'),
+              style: TextStyle(color: on ? green : const Color(0xFF9FB0DA), fontSize: 16, letterSpacing: 0.4)),
+        ]),
       ),
     );
   }
@@ -561,7 +630,6 @@ class DesktopSidebar extends StatelessWidget {
         NexoraWordmark(fontSize: 20, textColor: p.text),
         const SizedBox(height: 28),
         item(0, Icons.home_rounded, 'اتصال'),
-        item(1, Icons.settings_rounded, 'تنظیمات'),
         item(2, Icons.info_outline_rounded, 'اطلاعات'),
         item(3, Icons.public_rounded, 'فایرفاکس'),
         const Spacer(),
@@ -614,7 +682,6 @@ class NavBar extends StatelessWidget {
         decoration: BoxDecoration(color: p.card, border: Border(top: BorderSide(color: p.border.withOpacity(0.6)))),
         child: Row(children: [
           item(0, Icons.home_rounded, 'اتصال'),
-          item(1, Icons.settings_rounded, 'تنظیمات'),
           item(2, Icons.info_outline_rounded, 'اطلاعات'),
           item(3, Icons.public_rounded, 'فایرفاکس'),
         ]),
@@ -841,4 +908,258 @@ class _RingsPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _RingsPainter old) => old.t != t;
+}
+
+
+// ───────────────────────── سبک جدید تنظیمات (کارت گرد، آیکن رنگی سمت راست، کلید سمت چپ) ─────────────────────────
+class SSection extends StatelessWidget {
+  final String text;
+  const SSection(this.text, {super.key});
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.fromLTRB(22, 20, 22, 10),
+        child: Align(
+          alignment: Alignment.centerRight,
+          child: Text(text, style: TextStyle(color: P.of(context).sub, fontSize: 14.5, fontWeight: FontWeight.w700)),
+        ),
+      );
+}
+
+class SCard extends StatelessWidget {
+  final List<Widget> children;
+  const SCard({super.key, required this.children});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = P.of(context);
+    final rows = <Widget>[];
+    for (var i = 0; i < children.length; i++) {
+      rows.add(children[i]);
+      if (i != children.length - 1) {
+        // خط جداکننده از لبه‌ی چپ کارت تا ابتدای متن (زیر آیکن نمی‌رود)
+        rows.add(Padding(
+          padding: const EdgeInsets.only(right: 66),
+          child: Divider(height: 1, thickness: 1, color: p.border.withOpacity(0.28)),
+        ));
+      }
+    }
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4),
+      decoration: BoxDecoration(
+        color: p.card,
+        borderRadius: BorderRadius.circular(26),
+        border: Border.all(color: p.border.withOpacity(0.22)),
+      ),
+      child: ClipRRect(borderRadius: BorderRadius.circular(26), child: Column(children: rows)),
+    );
+  }
+}
+
+class STile extends StatelessWidget {
+  final IconData icon;
+  final Color? iconColor;
+  final String title;
+  final String? subtitle;
+  final String? value; // متن کنار فلش (مثل «فارسی»)
+  final Widget? trailing;
+  final VoidCallback? onTap;
+  const STile({super.key, required this.icon, required this.title, this.iconColor, this.subtitle, this.value, this.trailing, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = P.of(context);
+    final ic = iconColor ?? p.accent;
+    final Widget end = trailing ??
+        Row(mainAxisSize: MainAxisSize.min, children: [
+          if (value != null) Text(value!, style: TextStyle(color: p.sub, fontSize: 15)),
+          if (onTap != null) Icon(Icons.chevron_left_rounded, color: p.sub, size: 28),
+        ]);
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          child: Directionality(
+            textDirection: TextDirection.rtl,
+            child: Row(children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(color: ic, borderRadius: BorderRadius.circular(11)),
+                child: Icon(icon, color: Colors.white, size: 22),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(title, style: TextStyle(color: p.text, fontSize: 16.5, fontWeight: FontWeight.w600)),
+                  if (subtitle != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(subtitle!, style: TextStyle(color: p.sub, fontSize: 13, height: 1.6)),
+                    ),
+                ]),
+              ),
+              const SizedBox(width: 10),
+              end,
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class SToggle extends StatelessWidget {
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  const SToggle({super.key, required this.value, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => onChanged(!value),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        width: 54,
+        height: 32,
+        padding: const EdgeInsets.all(2.5),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          color: value ? const Color(0xFF30D158) : const Color(0xFF3A4057),
+        ),
+        child: AnimatedAlign(
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOutCubic,
+          alignment: value ? Alignment.centerLeft : Alignment.centerRight,
+          child: Container(
+            width: 27,
+            height: 27,
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              shape: BoxShape.circle,
+              boxShadow: [BoxShadow(color: Color(0x40000000), blurRadius: 4, offset: Offset(0, 1))],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// قالب صفحه‌ی تنظیمات: دکمه‌ی گردِ برگشت بالا-راست و عنوان وسط
+class SettingsScaffold extends StatelessWidget {
+  final String title;
+  final List<Widget> children;
+  const SettingsScaffold({super.key, required this.title, required this.children});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = P.of(context);
+    return Scaffold(
+      backgroundColor: p.bg,
+      body: AppBg(
+        child: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 640),
+              child: Column(children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                  child: Directionality(
+                    textDirection: TextDirection.rtl,
+                    child: Row(children: [
+                      GestureDetector(
+                        onTap: () => Navigator.maybePop(context),
+                        child: Container(
+                          width: 48,
+                          height: 48,
+                          decoration: BoxDecoration(shape: BoxShape.circle, color: p.card, border: Border.all(color: p.border.withOpacity(0.3))),
+                          child: Icon(Icons.chevron_right_rounded, color: p.text, size: 30),
+                        ),
+                      ),
+                      Expanded(child: Center(child: Text(title, style: TextStyle(color: p.text, fontSize: 19, fontWeight: FontWeight.w800)))),
+                      const SizedBox(width: 48),
+                    ]),
+                  ),
+                ),
+                Expanded(child: ListView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 28), children: children)),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// دکمه‌ی گرد شیشه‌ای پروفایل (بالا-چپ صفحه‌ی خانه)
+class ProfileButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const ProfileButton({super.key, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 46,
+        height: 46,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Colors.white.withOpacity(0.10), const Color(0xFF6A5CFF).withOpacity(0.14)]),
+          border: Border.all(color: const Color(0xFF8A7CFF).withOpacity(0.55), width: 1.2),
+        ),
+        child: const Icon(Icons.person_outline_rounded, color: Colors.white, size: 28),
+      ),
+    );
+  }
+}
+
+/// موج درخشان و نقطه‌چین بالای خانه (ثابت و سبک؛ فقط یک‌بار رسم می‌شود)
+class HeaderWave extends StatelessWidget {
+  const HeaderWave({super.key});
+
+  @override
+  Widget build(BuildContext context) => RepaintBoundary(child: CustomPaint(painter: _WavePainter(), size: Size.infinite));
+}
+
+class _WavePainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width, h = size.height;
+    final path = Path()
+      ..moveTo(-10, h * 0.78)
+      ..cubicTo(w * 0.18, h * 1.05, w * 0.30, h * 0.18, w * 0.52, h * 0.34)
+      ..cubicTo(w * 0.72, h * 0.50, w * 0.82, h * 0.98, w + 10, h * 0.62);
+    final shader = const LinearGradient(colors: [Color(0xFF2A6BFF), Color(0xFF7A3CFF), Color(0xFFB04CFF)]).createShader(Rect.fromLTWH(0, 0, w, h));
+    for (final e in const [[9.0, 0.06], [5.0, 0.12], [2.0, 0.55]]) {
+      canvas.drawPath(
+        path,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeWidth = e[0]
+          ..shader = shader
+          ..color = Colors.white.withOpacity(e[1]),
+      );
+    }
+    // نقطه‌چین محو زیر موج
+    const cols = 26, rows = 5;
+    final dp = Paint();
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        final x = w * (c + 0.5) / cols;
+        final y = h * (0.62 + r * 0.075);
+        final fade = (1 - r / rows) * (0.25 + 0.75 * (c / cols));
+        dp.color = Color.lerp(const Color(0xFF3A7BFF), const Color(0xFF9A4CFF), c / cols)!.withOpacity(0.55 * fade);
+        canvas.drawCircle(Offset(x, y), 1.5 - r * 0.15, dp);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter old) => false;
 }

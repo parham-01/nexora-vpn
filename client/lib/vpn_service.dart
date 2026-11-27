@@ -2,9 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:flutter/widgets.dart' show AppLifecycleState, WidgetsBinding, WidgetsBindingObserver;
 import 'api.dart';
+import 'cores.dart';
+import 'singbox_config.dart';
 import 'dns_tunnel.dart';
 import 'store.dart';
 import 'vpn_android.dart';
@@ -70,8 +74,11 @@ class VpnService with WidgetsBindingObserver {
   final ValueNotifier<List<StepView>> steps = ValueNotifier(const []);
   final ValueNotifier<List<DnsResult>> dnsResults = ValueNotifier(const []);
   final ValueNotifier<List<PingRes>> pingResults = ValueNotifier(const []);
-  final _Sem _winSem = _Sem(8);
+  final _Sem _winSem = _Sem(Platform.isAndroid ? 3 : 8); // هم‌زمانی تست sing-box (روی گوشی کمتر)
   final _Sem _pingSem = _Sem(16);
+  // پلاگین v2ray اندروید تست‌ها را پشت‌سرهم اجرا می‌کند؛ این دروازه فقط یک تست هسته را هم‌زمان رها می‌کند
+  // تا Timeout هر سرور از شروع واقعی تستش حساب شود (قبلاً از لحظه‌ی صف‌شدن حساب می‌شد و بعد از ۵ سرور اول همه Timeout می‌شدند).
+  final _Sem _v2Gate = _Sem(1);
   int _pingEpoch = 0;
   final Set<Process> _pingProcs = {};
   // کش نتایج پینگ (id کانفیگ ← میلی‌ثانیه؛ -1 یعنی ناموفق). با ورود به برنامه در پس‌زمینه پر می‌شود.
@@ -88,6 +95,10 @@ class VpnService with WidgetsBindingObserver {
   final AndroidVpn _android = AndroidVpn();
   bool _ready = false;
   Process? _proc;
+  Process? _sbProc; // sing-box اندروید (زنجیره‌ی Xray ← SOCKS ← sing-box)
+  File? _sbCfg;
+  bool _sbDead = false;
+  final Map<String, String> _ipCache = {};
   Timer? _tick;
   Timer? _ping;
   int _lastUp = 0;
@@ -123,6 +134,8 @@ class VpnService with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     Store.configs.addListener(_cfgChanged);
     _cfgTimer = Timer.periodic(const Duration(seconds: 3), (_) => Api.pollConfigs());
+    unawaited(Cores.refresh());
+    Timer.periodic(const Duration(seconds: 45), (_) => Cores.refresh());
     if (Platform.isAndroid) {
       await _android.init(_onAndroid);
     } else if (_desktop) {
@@ -135,8 +148,10 @@ class VpnService with WidgetsBindingObserver {
     try {
       if (Platform.isWindows) {
         await Process.run('taskkill', ['/F', '/IM', 'xray.exe']);
+        await Process.run('taskkill', ['/F', '/IM', 'sing-box.exe']);
       } else {
         await Process.run('pkill', ['-9', '-x', 'xray']);
+        await Process.run('pkill', ['-9', '-x', 'sing-box']);
       }
     } catch (_) {}
     await _setProxy(false);
@@ -159,7 +174,7 @@ class VpnService with WidgetsBindingObserver {
   static const List<String> _titles = [
     'ساخت تونل شخصی',
     'تست پینگ DNS',
-    'تست پینگ واقعی (Relay) و انتخاب کمترین',
+    'پینگ واقعی همه‌ی لوکیشن‌ها و انتخاب کمترین',
     'برقراری اتصال امن',
   ];
 
@@ -228,7 +243,12 @@ class VpnService with WidgetsBindingObserver {
     _session = _newSession();
     await Future.delayed(const Duration(milliseconds: 500));
     if (!_reported) return;
-    final g = await Api.geo(proxy: _desktop ? '127.0.0.1:10809' : null);
+    var g = await Api.geo(proxy: _desktop ? '127.0.0.1:10809' : null);
+    // اگر کشور «ایران» برگشت یعنی هنوز ترافیک از تونل رد نشده یا از جواب قدیمی آمده؛ چند بار دوباره (کشور واقعیِ خروجی)
+    for (var i = 0; i < 4 && _reported && g != null && g.code.toUpperCase() == 'IR' && cfg != null && '${cfg['code'] ?? ''}'.toUpperCase() != 'IR'; i++) {
+      await Future.delayed(const Duration(milliseconds: 1500));
+      g = await Api.geo(proxy: _desktop ? '127.0.0.1:10809' : null, attempts: 1) ?? g;
+    }
     if (!_reported) return; // در همین فاصله قطع شده
     geo.value = g;
     if (g == null) _retryGeo();
@@ -245,7 +265,45 @@ class VpnService with WidgetsBindingObserver {
       unawaited(Api.syncWindowsTimezone(g?.code ?? (cfg == null ? '' : '${cfg['code'] ?? ''}')));
     }
     _ping?.cancel();
-    _ping = Timer.periodic(const Duration(seconds: 60), (_) => Api.event({'type': 'ping'}));
+    _alerted = false;
+    _remindDone = false;
+    _capDone = false;
+    if (Store.getBool('haptic', true)) HapticFeedback.mediumImpact();
+    _ping = Timer.periodic(const Duration(seconds: 60), (_) {
+      final st = status.value;
+      Api.event({'type': 'ping', 'session': _session, 'up': st.up, 'down': st.down, 'seconds': st.seconds});
+      _applyLimits(st);
+    });
+  }
+
+  bool _alerted = false;
+  bool _remindDone = false;
+  bool _capDone = false;
+
+  /// گزینه‌های «قطع خودکار بعد از N ساعت» و «هشدار مصرف نشست» از تنظیمات پیشرفته
+  void _applyLimits(VpnStatus st) {
+    if (st.phase != Phase.on) return;
+    final h = Store.autoOffHours;
+    if (h > 0 && st.seconds >= h * 3600) {
+      note.value = 'اتصال بعد از $h ساعت، طبق تنظیمات قطع شد';
+      disconnect();
+      return;
+    }
+    final mb = Store.usageAlertMb;
+    if (mb > 0 && !_alerted && (st.up + st.down) >= mb * 1048576) {
+      _alerted = true;
+      note.value = 'مصرف این اتصال به ${fmtBytes(mb * 1048576)} رسید';
+    }
+    final rh = Store.getInt('remind_h', 0);
+    if (rh > 0 && !_remindDone && st.seconds >= rh * 3600) {
+      _remindDone = true;
+      note.value = 'حدود $rh ساعت است که وصل هستی';
+    }
+    final cap = Store.getInt('total_cap_gb', 0);
+    if (cap > 0 && !_capDone && (Store.statUp + Store.statDown + st.up + st.down) >= cap * 1073741824) {
+      _capDone = true;
+      note.value = 'مصرف کل این دستگاه به $cap گیگابایت رسید';
+    }
   }
 
   Future<void> _retryGeo() async {
@@ -262,14 +320,17 @@ class VpnService with WidgetsBindingObserver {
     final id = _connId;
     if (id.isEmpty || status.value.phase != Phase.on) return;
     if (Store.configs.value.any((c) => '${c['id']}' == id)) return;
-    note.value = 'این کانفیگ توسط ادمین حذف شد؛ اتصال قطع شد';
+    note.value = 'این کانفیگ حذف شد؛ اتصال قطع شد';
     disconnect();
   }
 
   void _afterDisconnected() {
+    if (_connectSent && Store.getBool('haptic', true)) HapticFeedback.heavyImpact();
     _connId = '';
+    unawaited(_killSb());
     final s = status.value;
     if (_connectSent) {
+      unawaited(Store.addUsage(s.up, s.down, s.seconds));
       Api.event({'type': 'disconnect', 'session': _session, 'up': s.up, 'down': s.down, 'seconds': s.seconds});
     }
     _reported = false;
@@ -291,6 +352,7 @@ class VpnService with WidgetsBindingObserver {
     _connecting = true;
     _cancel = false;
     _leftApp = false;
+    lastError = '';
     _resetSteps(exact: exact);
     status.value = const VpnStatus(Phase.connecting);
     var err = 'error';
@@ -368,6 +430,12 @@ class VpnService with WidgetsBindingObserver {
     return null;
   }
 
+  // دلیل کوتاه شکست اتصال برای نمایش در مرحله‌ی «برقراری اتصال امن»
+  static String _shortErr(String r) {
+    // پیام ساده برای کاربر؛ دلیل دقیق در لاگ ادمین ثبت می‌شود
+    return 'اتصال برقرار نشد';
+  }
+
   Future<String?> _connectExact(Map<String, dynamic> cfg) async {
     final id = '${cfg['id']}';
     var title = cfgTitle(cfg);
@@ -382,7 +450,7 @@ class VpnService with WidgetsBindingObserver {
     _step(2, StepPhase.done, valid ? 'پینگ همین لوکیشن: ${ms}ms' : 'پینگ جواب نداد • تلاش مستقیم برای اتصال');
     _step(3, StepPhase.run, 'در حال اتصال...');
     var err = 'timeout';
-    for (var k = 0; k < 2; k++) {
+    for (var k = 0; k < 1; k++) {
       if (_cancel) return _cancelCode();
       note.value = valid ? 'اتصال با پینگ ${ms}ms' : 'در حال اتصال...';
       final r = await _attempt(cfg);
@@ -404,7 +472,7 @@ class VpnService with WidgetsBindingObserver {
       }
       await _stopCore();
     }
-    _step(3, StepPhase.fail, 'اتصال به این لوکیشن برقرار نشد');
+    _step(3, StepPhase.fail, _shortErr(err));
     return err;
   }
 
@@ -440,11 +508,14 @@ class VpnService with WidgetsBindingObserver {
       return '';
     }
 
-    // ۱) کش (فقط یک‌بار، اگر تازه باشد)
+    // ۱) کش فقط وقتی استفاده می‌شود که تازه (کمتر از ۲ دقیقه) و برای «همه»ی کانفیگ‌ها کامل باشد
+    // (مثلاً همین الان دکمه‌ی پینگ صفحه‌ی سرورها زده شده)؛ در غیر این‌صورت تست تازه‌ی همه انجام می‌شود تا واقعاً کمترین پینگ انتخاب شود.
     final at = pingCacheAt;
-    final useCache = !_cacheUsed;
-    _cacheUsed = true; // فقط اولین اتصال از کش استفاده می‌کند؛ اتصال‌های بعدی همیشه تست تازه دارند
-    if (useCache && at != null && DateTime.now().difference(at).inMinutes < 20) {
+    final useCache = at != null &&
+        DateTime.now().difference(at).inSeconds < 120 &&
+        list.every((c) => pingCache.containsKey('${c['id']}'));
+    _cacheUsed = true;
+    if (useCache) {
       final cached = <MapEntry<Map<String, dynamic>, int>>[
         for (final c in list)
           if (Api.validPing(pingCache['${c['id']}'] ?? -1)) MapEntry(c, pingCache['${c['id']}']!)
@@ -493,7 +564,8 @@ class VpnService with WidgetsBindingObserver {
       if (early) {
         await Future.any<void>([all, firstValid.future]);
         if (pending > 0) {
-          await Future.any<void>([all, Future<void>.delayed(const Duration(milliseconds: 900))]);
+          // بعد از اولین پینگ معتبر تا ۶ ثانیه به بقیه فرصت می‌دهیم تا «کمترین» پینگ واقعاً از بین همه انتخاب شود
+          await Future.any<void>([all, Future<void>.delayed(const Duration(seconds: 6))]);
           if (pending > 0) {
             abandoned = true;
             cancelPings(); // بقیه‌ی پینگ‌های در حال اجرا بسته می‌شوند
@@ -525,7 +597,8 @@ class VpnService with WidgetsBindingObserver {
       return '';
     }
 
-    final batch = _desktop ? 8 : 12;
+    // همه‌ی لوکیشن‌ها در یک دسته تست می‌شوند (همزمانی را _pingSem کنترل می‌کند) تا کمترین پینگ از بین همه معلوم شود
+    final batch = max(rest.length, 1);
     for (var s = 0; s < rest.length; s += batch) {
       if (_cancel) return _cancelCode();
       final r = await testChunk(rest.sublist(s, min(s + batch, rest.length)), true);
@@ -548,10 +621,10 @@ class VpnService with WidgetsBindingObserver {
         final r = await tryOne(c, 0);
         if (r != '') return r;
       }
-      _step(3, StepPhase.fail, 'هیچ‌کدام از کانفیگ‌ها وصل نشد');
+      _step(3, StepPhase.fail, 'هیچ‌کدام از کانفیگ‌ها وصل نشد • ${_shortErr(err)}');
       return err == 'no_valid_ping' ? 'timeout' : err;
     }
-    _step(3, StepPhase.fail, 'هیچ‌کدام از کانفیگ‌های سالم وصل نشد');
+    _step(3, StepPhase.fail, 'هیچ‌کدام از کانفیگ‌های سالم وصل نشد • ${_shortErr(err)}');
     return err;
   }
 
@@ -605,6 +678,11 @@ class VpnService with WidgetsBindingObserver {
       if (id != null) pingCache[id] = -1;
       return -1;
     }
+    // هسته‌ی این پروتکل توسط ادمین غیرفعال شده → پینگ/اتصال ندارد
+    if (!Cores.allows(link)) {
+      if (id != null) pingCache[id] = -1;
+      return -1;
+    }
     final epoch = _pingEpoch;
     await _pingSem.acquire();
     if (epoch != _pingEpoch) {
@@ -612,14 +690,40 @@ class VpnService with WidgetsBindingObserver {
       return -1; // لغو شده؛ در کش ذخیره نمی‌شود
     }
     var ms = -1;
+    final useGate = Platform.isAndroid && info.engine == 'xray';
+    var gated = false;
     try {
+      if (info.engine == 'xray' && !info.transport.contains('kcp') && !info.transport.contains('quic')) {
+        final tcp = await Api.pingLink(link, timeoutSec: 2);
+        if (tcp < 0) {
+          if (id != null) {
+            pingCache[id] = -1;
+            pingCacheRev.value++;
+          }
+          return -1;
+        }
+        if (epoch != _pingEpoch) return -1;
+      }
+      if (useGate) {
+        await _v2Gate.acquire();
+        gated = true;
+        if (epoch != _pingEpoch) return -1; // لغو شده
+      }
       // محافظ قفل‌شدن: اگر فراخوانی بومی/هسته جواب ندهد، worker برای همیشه گیر نمی‌کند
-      final Future<int> f = Platform.isAndroid ? _android.delay(link, info.outbound!) : (_desktop ? _winDelay(link) : Api.pingLink(link));
-      // پینگ بالای ۳ ثانیه ویلید نیست؛ ۷ ثانیه (راه‌اندازی هسته + یک درخواست) برای دیدن شکست کافی است
-      ms = await f.timeout(const Duration(seconds: 7), onTimeout: () => -1);
+      final Future<int> f;
+      if (info.engine != 'xray') {
+        // sing-box (Hysteria2/TUIC/WireGuard): همه‌ی پلتفرم‌ها (اندروید با libsingbox.so داخل APK)
+        f = (_desktop || Platform.isAndroid) && info.engine == 'singbox' ? _sbDelay(link) : Future<int>.value(-1);
+      } else {
+        // همان DNS ای که اتصال استفاده می‌کند → «پینگ خوب» یعنی «اتصال خوب»
+        f = Platform.isAndroid ? _android.delay(link, info.outbound!, dns: _dnsXray()) : (_desktop ? _winDelay(link) : Api.pingLink(link));
+      }
+      // مثل V2rayNG: Timeout هسته ۱۲ ثانیه است؛ این محافظ فقط برای قفل‌شدن بومی است و از شروع واقعی تست حساب می‌شود
+      ms = await f.timeout(Duration(seconds: useGate ? 28 : 14), onTimeout: () => -1);
     } catch (_) {
       ms = -1;
     } finally {
+      if (gated) _v2Gate.release();
       _pingSem.release();
     }
     if (epoch != _pingEpoch) return -1;
@@ -649,7 +753,7 @@ class VpnService with WidgetsBindingObserver {
       final hp = await _freePort();
       final sp = await _freePort();
       final ap = await _freePort();
-      final conf = buildXrayConfig(link, httpPort: hp, socksPort: sp, apiPort: ap);
+      final conf = buildXrayConfig(link, httpPort: hp, socksPort: sp, apiPort: ap, profile: 2);
       if (conf == null) return -1;
       f = File(_tmpFile('nexora_ping_${hp}_${DateTime.now().microsecondsSinceEpoch}.json'));
       await f.writeAsString(jsonEncode(conf));
@@ -689,25 +793,53 @@ class VpnService with WidgetsBindingObserver {
     if (info.outbound == null) return 'bad_link';
     _protocol = info.protocol;
     _transport = info.transport;
+    if (!Cores.allows(link)) return 'core_disabled';
+    if (info.engine == 'amneziawg') return 'awg_unsupported';
+    if (info.engine != 'xray') {
+      if (info.engine == 'singbox' && Platform.isAndroid) return _attemptSingboxAndroid(cfg, link);
+      if (info.engine == 'singbox' && _desktop) return _attemptSingbox(link);
+      return 'core_missing';
+    }
     if (Platform.isAndroid) {
-      bool ok;
-      _askingPermission = true;
-      try {
-        ok = await _android.start(link, cfgTitle(cfg), info.outbound!, dns: _dnsXray());
-      } finally {
-        await Future.delayed(const Duration(milliseconds: 400));
-        _askingPermission = false;
+      // پروفایل‌ها (از سخت‌ترین/امن‌ترین به ساده‌ترین): ۰) فرگمنت + DoH  ۱) outbound برنامه + DNS ساده  ۲) کانفیگ خام پلاگین (مثل v2rayNG).
+      // اگر تونل بالا بیاید ولی اینترنت واقعاً کار نکند، خودکار با پروفایل بعدی دوباره امتحان می‌شود.
+      var last = 'timeout';
+      const profiles = 3;
+      for (var profile = 0; profile < profiles; profile++) {
+        if (_cancel) return _cancelCode();
+        if (profile >= 1) {
+          await _android.stop();
+          await Future.delayed(const Duration(milliseconds: 600));
+          if (_cancel) return _cancelCode();
+          status.value = const VpnStatus(Phase.connecting);
+        }
+        bool ok;
+        _askingPermission = true;
+        try {
+          ok = await _android.start(link, cfgTitle(cfg), info.outbound!, dns: _dnsXray(), profile: profile);
+        } finally {
+          await Future.delayed(const Duration(milliseconds: 400));
+          _askingPermission = false;
+        }
+        if (!ok) return 'permission';
+        if (!await _waitOn(const Duration(seconds: 10))) {
+          last = 'timeout';
+          continue;
+        }
+        // تست واقعیِ اینترنت از داخل تونل (نه فقط «وصل شد» بودنِ هسته)
+        var ms = -1;
+        for (var k = 0; k < 3 && !_cancel; k++) {
+          ms = await Api.reachMs(timeout: 5);
+          if (ms >= 1 && ms <= 8000) break;
+          await Future.delayed(const Duration(milliseconds: 500));
+        }
+        if (ms < 1 || ms > 8000) {
+          last = 'no_internet';
+          continue;
+        }
+        return null;
       }
-      if (!ok) return 'permission';
-      if (!await _waitOn(const Duration(seconds: 12))) return 'timeout';
-      var ms = -1;
-      for (var k = 0; k < 3 && !_cancel; k++) {
-        ms = await Api.reachMs();
-        if (ms >= 1 && ms <= 8000) break;
-        await Future.delayed(const Duration(milliseconds: 700));
-      }
-      if (ms < 1 || ms > 8000) return 'no_internet';
-      return null;
+      return last;
     }
     return _attemptWindows(link);
   }
@@ -722,14 +854,339 @@ class VpnService with WidgetsBindingObserver {
     return false;
   }
 
+  // ---------- sing-box (دسکتاپ): Hysteria2 / TUIC / WireGuard ----------
+  static String get _sbDir => '$_appDir${_sep}singbox';
+  static String get _sbExe => Platform.isAndroid ? (AndroidVpn.singboxPath ?? '') : '$_sbDir$_sep${Platform.isWindows ? 'sing-box.exe' : 'sing-box'}';
+
+  Future<int> _sbDelay(String link) async {
+    final exe = _sbExe;
+    if (exe.isEmpty || !File(exe).existsSync()) return -1;
+    var sb = parseSingboxLink(link);
+    if (sb == null) return -1;
+    if (Platform.isAndroid) {
+      // باینری sing-box در اندروید resolver ندارد؛ دامنه‌ی سرور را خود برنامه resolve می‌کند
+      final r = await _withIp(sb);
+      if (r == null) return -1;
+      sb = r;
+    }
+    final epoch = _pingEpoch;
+    await _winSem.acquire();
+    Process? p;
+    File? f;
+    try {
+      if (epoch != _pingEpoch) return -1;
+      final hp = await _freePort();
+      final conf = buildSingboxConfig(sb, httpPort: hp, socksPort: hp, template: Cores.templateFor(link), android: Platform.isAndroid);
+      if (conf == null) return -1;
+      f = File(_tmpFile('nexora_sb_ping_${hp}_${DateTime.now().microsecondsSinceEpoch}.json'));
+      await f.writeAsString(jsonEncode(conf));
+      p = await Process.start(exe, ['run', '-c', f.path], workingDirectory: Platform.isAndroid ? Directory.systemTemp.path : _sbDir);
+      _pingProcs.add(p);
+      p.stdout.listen((_) {});
+      p.stderr.listen((_) {});
+      var up = false;
+      for (var i = 0; i < 90; i++) {
+        if (epoch != _pingEpoch) return -1;
+        try {
+          final s = await Socket.connect('127.0.0.1', hp, timeout: const Duration(milliseconds: 150));
+          s.destroy();
+          up = true;
+          break;
+        } catch (_) {
+          await Future.delayed(const Duration(milliseconds: 40));
+        }
+      }
+      if (!up) return -1;
+      return await Api.delayVia('127.0.0.1:$hp');
+    } catch (_) {
+      return -1;
+    } finally {
+      if (p != null) _pingProcs.remove(p);
+      p?.kill();
+      try {
+        f?.deleteSync();
+      } catch (_) {}
+      _winSem.release();
+    }
+  }
+
+  Future<String?> _attemptSingbox(String link) async {
+    final exe = _sbExe;
+    if (!File(exe).existsSync()) {
+      lastError = 'sing-box در این مسیر پیدا نشد: $exe';
+      return 'core_missing';
+    }
+    final sb = parseSingboxLink(link);
+    if (sb == null) return 'bad_link';
+    final conf = buildSingboxConfig(sb, httpPort: 10809, socksPort: 10808, template: Cores.templateFor(link));
+    if (conf == null) return 'bad_link';
+    try {
+      if (Platform.isWindows) {
+        await Process.run('taskkill', ['/F', '/IM', 'sing-box.exe']);
+      } else {
+        await Process.run('pkill', ['-9', '-x', 'sing-box']);
+      }
+    } catch (_) {}
+    final cfgFile = File(_tmpFile('nexora_singbox.json'));
+    await cfgFile.writeAsString(jsonEncode(conf));
+    _procDead = false;
+    final p = await Process.start(exe, ['run', '-c', cfgFile.path], workingDirectory: _sbDir);
+    _proc = p;
+    final buf = StringBuffer();
+    p.stdout.transform(utf8.decoder).listen((s) {
+      if (buf.length < 2000) buf.write(s);
+    });
+    p.stderr.transform(utf8.decoder).listen((s) {
+      if (buf.length < 2000) buf.write(s);
+    });
+    p.exitCode.then((_) {
+      _procDead = true;
+      if (identical(_proc, p) && !_connecting && status.value.phase != Phase.off) _stopWindowsState();
+    });
+    await Future.delayed(const Duration(milliseconds: 1500));
+    if (_procDead) {
+      lastError = buf.toString();
+      return 'core_failed';
+    }
+    var pm = -1;
+    for (var k = 0; k < 3 && !_cancel; k++) {
+      pm = await Api.reachMs(proxy: '127.0.0.1:10809', timeout: 6);
+      if (pm >= 1 && pm <= 8000) break;
+      await Future.delayed(const Duration(milliseconds: 600));
+    }
+    if (pm < 1 || pm > 8000) return 'no_internet';
+    await _setProxy(true);
+    status.value = const VpnStatus(Phase.on);
+    _tick?.cancel();
+    final sw = Stopwatch()..start();
+    // sing-box آمار ترافیک را از این مسیر نمی‌دهد؛ فقط مدت اتصال به‌روز می‌شود
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (status.value.phase == Phase.on) status.value = VpnStatus(Phase.on, seconds: sw.elapsedMilliseconds ~/ 1000);
+    });
+    return null;
+  }
+
+  // ---------- sing-box (اندروید): زنجیره‌ی  VPN ← Xray ← SOCKS محلی ← sing-box ----------
+  // باینری sing-box به شکل libsingbox.so داخل APK است (tools/get_singbox.py android) و از پوشه‌ی کتابخانه‌های بومی اجرا می‌شود.
+  Future<void> _killSb() async {
+    final p = _sbProc;
+    _sbProc = null;
+    if (p != null) {
+      try {
+        p.kill(ProcessSignal.sigterm);
+      } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 120));
+      try {
+        p.kill(ProcessSignal.sigkill);
+      } catch (_) {}
+    }
+    try {
+      _sbCfg?.deleteSync();
+    } catch (_) {}
+    _sbCfg = null;
+  }
+
+  // دامنه‌ی سرور → IP (اول DNS سیستم، بعد DoH). null = resolve نشد.
+  Future<SingboxLink?> _withIp(SingboxLink l) async {
+    final h = l.host;
+    if (h.isEmpty) return null;
+    if (InternetAddress.tryParse(h) != null) return l;
+    final c = _ipCache[h];
+    if (c != null) return l.withServerIp(c);
+    String? ip;
+    try {
+      final r = await InternetAddress.lookup(h, type: InternetAddressType.IPv4).timeout(const Duration(seconds: 5));
+      if (r.isNotEmpty) ip = r.first.address;
+    } catch (_) {}
+    if (ip == null) {
+      for (final u in const ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query']) {
+        final id = Random().nextInt(65534) + 1;
+        final a = await dohPost(u, dnsQuery(h, 1, id), timeoutMs: 3000);
+        if (a != null) ip = _firstA(a);
+        if (ip != null) break;
+      }
+    }
+    if (ip == null) return null;
+    _ipCache[h] = ip;
+    return l.withServerIp(ip);
+  }
+
+  String? _firstA(Uint8List a) {
+    if (a.length < 12) return null;
+    final qd = (a[4] << 8) | a[5];
+    final an = (a[6] << 8) | a[7];
+    int skip(int o) {
+      while (o < a.length) {
+        final l = a[o];
+        if (l == 0) return o + 1;
+        if ((l & 0xC0) == 0xC0) return o + 2;
+        o += l + 1;
+      }
+      return o;
+    }
+
+    var i = 12;
+    for (var q = 0; q < qd; q++) {
+      i = skip(i) + 4;
+    }
+    for (var k = 0; k < an && i < a.length; k++) {
+      i = skip(i);
+      if (i + 10 > a.length) return null;
+      final t = (a[i] << 8) | a[i + 1];
+      final rl = (a[i + 8] << 8) | a[i + 9];
+      i += 10;
+      if (t == 1 && rl == 4 && i + 4 <= a.length) return '${a[i]}.${a[i + 1]}.${a[i + 2]}.${a[i + 3]}';
+      i += rl;
+    }
+    return null;
+  }
+
+  Future<bool> _portUp(int port, {int tries = 60}) async {
+    for (var i = 0; i < tries; i++) {
+      if (_sbDead || _cancel) return false;
+      try {
+        final s = await Socket.connect('127.0.0.1', port, timeout: const Duration(milliseconds: 150));
+        s.destroy();
+        return true;
+      } catch (_) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+    }
+    return false;
+  }
+
+  String _lastLines(StringBuffer b) {
+    final t = b.toString().trim().split('\n').where((e) => e.trim().isNotEmpty).toList();
+    if (t.isEmpty) return '';
+    return t.sublist(max(0, t.length - 3)).join('\n');
+  }
+
+  Future<String?> _attemptSingboxAndroid(Map<String, dynamic> cfg, String link) async {
+    final exe = AndroidVpn.singboxPath;
+    if (exe == null) {
+      lastError = 'libsingbox.so داخل این APK نیست (مسیر کتابخانه‌ها: ${AndroidVpn.nativeLibDir ?? 'نامشخص'})';
+      return 'core_missing';
+    }
+    final sb0 = parseSingboxLink(link);
+    if (sb0 == null) return 'bad_link';
+    note.value = 'در حال پیدا کردن آدرس سرور...';
+    final sb = await _withIp(sb0);
+    if (_cancel) return _cancelCode();
+    if (sb == null) {
+      lastError = 'resolve نشد: ${sb0.host}';
+      return 'server_dns';
+    }
+    await _killSb();
+    final httpPort = await _freePort();
+    final socksPort = await _freePort();
+    final conf = buildSingboxConfig(sb, httpPort: httpPort, socksPort: socksPort, template: Cores.templateFor(link), android: true);
+    if (conf == null) return 'bad_link';
+    final cf = File(_tmpFile('nexora_sb_$socksPort.json'));
+    await cf.writeAsString(jsonEncode(conf));
+    _sbCfg = cf;
+    _sbDead = false;
+    final log = StringBuffer();
+    note.value = 'در حال بالا آوردن هسته‌ی sing-box...';
+    Process p;
+    try {
+      p = await Process.start(exe, ['run', '-c', cf.path], workingDirectory: Directory.systemTemp.path);
+    } catch (e) {
+      lastError = '$e';
+      return 'core_exec';
+    }
+    _sbProc = p;
+    void feed(String s) {
+      if (log.length < 4000) log.write(s);
+    }
+
+    p.stdout.transform(utf8.decoder).listen(feed, onError: (_) {});
+    p.stderr.transform(utf8.decoder).listen(feed, onError: (_) {});
+    unawaited(p.exitCode.then((code) {
+      if (!identical(_sbProc, p)) return;
+      _sbProc = null;
+      _sbDead = true;
+      if (!_connecting && status.value.phase == Phase.on) {
+        note.value = 'هسته‌ی sing-box بسته شد (کد $code)؛ اتصال قطع شد';
+        unawaited(_android.stop());
+      }
+    }));
+    if (!await _portUp(socksPort)) {
+      if (_cancel) return _cancelCode();
+      lastError = _lastLines(log).isEmpty ? 'هسته بدون خروجی بسته شد یا پورت باز نشد' : _lastLines(log);
+      return _sbDead ? 'core_failed' : 'core_timeout';
+    }
+    // ۱) تونل sing-box تا سرور و اینترنت: مستقیم از پروکسی محلی sing-box (بدون VPN) تست می‌شود
+    note.value = 'در حال تست مسیر سرور...';
+    var ms = -1;
+    for (var k = 0; k < 2 && !_cancel && !_sbDead; k++) {
+      ms = await Api.reachMs(proxy: '127.0.0.1:$httpPort', timeout: 6);
+      if (ms >= 1 && ms <= 8000) break;
+    }
+    if (_cancel) return _cancelCode();
+    if (ms < 1 || ms > 8000) {
+      final l = _lastLines(log);
+      lastError = l.isEmpty ? 'هسته بالا آمد ولی از سرور جوابی نیامد' : l;
+      return _sbDead ? 'core_failed' : 'tunnel_no_internet';
+    }
+    // ۲) VPN اندروید (Xray) با خروجی SOCKS به sing-box؛ خود برنامه از VPN مستثنا است
+    note.value = 'در حال برقراری VPN...';
+    bool ok;
+    _askingPermission = true;
+    try {
+      ok = await _android.startChain(cfgTitle(cfg), socksPort);
+    } finally {
+      await Future.delayed(const Duration(milliseconds: 400));
+      _askingPermission = false;
+    }
+    if (!ok) {
+      await _killSb();
+      return 'permission';
+    }
+    if (!await _waitOn(const Duration(seconds: 10))) {
+      await _killSb();
+      return 'timeout';
+    }
+    // ۳) کل زنجیره (Xray ← sing-box ← سرور ← اینترنت) از ورودی HTTP محلیِ Xray
+    var pm = -1;
+    for (var k = 0; k < 3 && !_cancel && !_sbDead; k++) {
+      pm = await Api.reachMs(proxy: '127.0.0.1:10809', timeout: 6);
+      if (pm >= 1 && pm <= 8000) break;
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+    if (pm < 1 || pm > 8000) {
+      lastError = _lastLines(log);
+      return 'chain_failed';
+    }
+    return null;
+  }
+
+  /// ویندوز / مک / لینوکس: سه پروفایل از سخت‌ترین به ساده‌ترین؛ کاربر چیزی متوجه نمی‌شود.
   Future<String?> _attemptWindows(String link) async {
+    var last = 'no_internet';
+    for (var profile = 0; profile < 3; profile++) {
+      if (_cancel) return _cancelCode();
+      final r = await _attemptDesktopOnce(link, profile);
+      if (r == null) return null;
+      if (r == 'bad_link' || r == 'no_core' || _cancel) return r;
+      last = r;
+      try {
+        _proc?.kill();
+      } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 400));
+    }
+    return last;
+  }
+
+  Future<String?> _attemptDesktopOnce(String link, int profile) async {
     final conf = buildXrayConfig(
       link,
       httpPort: 10809,
       socksPort: 10808,
       dns: _dnsXray(),
-      enableFragment: Store.stealth,
+      enableFragment: true,
+      profile: profile,
       upstreamProxy: Store.upstreamProxyEnabled ? Store.upstreamProxy : null,
+      tune: true,
     );
     if (conf == null) return 'bad_link';
     final exe = _xrayExe;
@@ -913,6 +1370,7 @@ class VpnService with WidgetsBindingObserver {
     _tick?.cancel();
     if (Platform.isAndroid) {
       await _android.stop();
+      await _killSb();
       await Future.delayed(const Duration(milliseconds: 400));
       if (_connecting) status.value = const VpnStatus(Phase.connecting);
     } else if (_desktop) {
@@ -931,6 +1389,7 @@ class VpnService with WidgetsBindingObserver {
     _cancel = true;
     if (Platform.isAndroid) {
       await _android.stop();
+      await _killSb();
       _afterDisconnected();
     } else if (_desktop) {
       final p = _proc;

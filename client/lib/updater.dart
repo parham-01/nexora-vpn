@@ -9,7 +9,7 @@ import 'store.dart';
 
 /// مخزن اصلی پروژه که ریلیزها در آن منتشر می‌شود: https://github.com/parham-01/nexora-vpn (بخش Releases)
 /// آخرین نسخه از https://api.github.com/repos/parham-01/nexora-vpn/releases/latest خوانده می‌شود.
-const String kUpdateRepo = String.fromEnvironment('UPDATE_REPO', defaultValue: 'parham-01/nexora-vpn');
+const String kUpdateRepo = 'parham-01/nexora-vpn';
 
 /// نسخه‌ی برنامه که ورک‌فلو هنگام بیلد می‌گذارد (مثلاً 1.0.42). روی اندروید نسخه‌ی واقعی نصب‌شده خوانده می‌شود.
 const String kAppVersion = String.fromEnvironment('APP_VERSION');
@@ -29,7 +29,7 @@ class ReleaseAsset {
   final String apiUrl; // برای ریپوی خصوصی (با توکن)
 
   /// ریپوی خصوصی با آدرس API دانلود می‌شود؛ عمومی با آدرس مرورگر.
-  String get downloadUrl => Updater.token.isNotEmpty && apiUrl.isNotEmpty ? apiUrl : url;
+  String get downloadUrl => url;
 }
 
 class ReleaseInfo {
@@ -64,6 +64,7 @@ class ReleaseInfo {
 
       if (abi.startsWith('arm64')) return byPart('arm64-v8a') ?? byPart('universal') ?? apks.first;
       if (abi.startsWith('armeabi') || abi.startsWith('arm')) return byPart('armeabi-v7a') ?? byPart('universal') ?? apks.first;
+      if (abi.startsWith('x86_64')) return byPart('x86_64') ?? byPart('universal') ?? apks.first;
       return byPart('universal') ?? apks.first;
     }
     if (Platform.isWindows) {
@@ -109,10 +110,8 @@ class Updater {
   // ------------------------------------------------------------ توکن GitHub
   static String get token => Store.getStr('gh_token').trim();
 
-  /// توکنی که از اپ ادمین ذخیره شده را بی‌صدا می‌گیرد (برای ریپوی خصوصی و جلوگیری از Rate Limit).
+
   static Future<void> syncToken() async {
-    final t = await Api.appSetting('github_token');
-    if (t.isNotEmpty && t != token) await Store.setStr('gh_token', t);
   }
 
   // ------------------------------------------------------------ نسخه‌ی نصب‌شده
@@ -162,6 +161,18 @@ class Updater {
     }
   }
 
+  static Future<dynamic> _fetch(String url) async {
+    try {
+      return await _getJson(url, withToken: false);
+    } on FormatException catch (e) {
+      final m = e.message;
+      if (token.isNotEmpty && (m == 'rate_limited' || m == 'forbidden' || m == 'release_not_found')) {
+        return await _getJson(url, withToken: true);
+      }
+      rethrow;
+    }
+  }
+
   static ReleaseInfo _parse(Map<String, dynamic> j) => ReleaseInfo(
         '${j['tag_name'] ?? ''}',
         '${j['name'] ?? ''}',
@@ -176,32 +187,13 @@ class Updater {
   /// اگر مثلاً فقط نسخه‌ی ویندوز منتشر شده باشد، کاربر اندروید پیام کاذب نمی‌گیرد.
   static Future<ReleaseInfo> latest({String abi = ''}) async {
     try {
-      final one = await _getJson('https://api.github.com/repos/$kUpdateRepo/releases/latest', withToken: token.isNotEmpty);
+      final one = await _fetch('https://api.github.com/repos/$kUpdateRepo/releases/latest');
       if (one is Map<String, dynamic> && one['draft'] != true && one['prerelease'] != true) {
         final r = _parse(one);
         if (r.assetFor(abi) != null) return r;
       }
     } catch (_) {}
-    final url = 'https://api.github.com/repos/$kUpdateRepo/releases?per_page=20';
-    dynamic list;
-    try {
-      list = await _getJson(url);
-    } on FormatException catch (e) {
-      final m = e.message;
-      final retry = token.isNotEmpty && (m == 'release_not_found_token' || m == 'bad_token' || m == 'forbidden');
-      if (!retry) rethrow;
-      try {
-        list = await _getJson(url, withToken: false);
-      } on FormatException {
-        throw FormatException(m);
-      }
-    }
-    if (list is! List || list.isEmpty) {
-      try {
-        final one = await _getJson('https://api.github.com/repos/$kUpdateRepo/releases/latest', withToken: token.isNotEmpty);
-        if (one is Map<String, dynamic>) list = [one];
-      } catch (_) {}
-    }
+    final dynamic list = await _fetch('https://api.github.com/repos/$kUpdateRepo/releases?per_page=20');
     if (list is! List || list.isEmpty) throw const FormatException('release_not_found');
     ReleaseInfo? newest;
     for (final e in list) {
@@ -254,7 +246,7 @@ class Updater {
   // ------------------------------------------------------------ دانلود / نصب
   static Future<void> start(ReleaseInfo release, ReleaseAsset asset) {
     if (Platform.isAndroid) {
-      return _ch.invokeMethod<void>('start', {'url': asset.downloadUrl, 'version': release.version, 'token': token});
+      return _ch.invokeMethod<void>('start', {'url': asset.downloadUrl, 'version': release.version, 'token': ''});
     }
     return _desktopStart(release, asset);
   }

@@ -5,11 +5,6 @@ import 'dart:math';
 import 'package:flutter/material.dart' show Color;
 import 'store.dart';
 
-const String _sbBuildUrl = String.fromEnvironment('SB_URL', defaultValue: '');
-const String _sbBuildKey = String.fromEnvironment('SB_KEY');
-String get sbUrl => _sbBuildUrl;
-String get sbKey => _sbBuildKey.trim();
-
 class Geo {
   final String ip, country, code;
   Geo(this.ip, this.country, this.code);
@@ -107,40 +102,11 @@ class Api {
     }
   }
 
-  static Future<dynamic> _sb(String method, String path, {Object? body, int timeout = 15, bool retry = true}) async {
-    if (sbKey.isEmpty) throw const HttpException('no key');
-    final c = HttpClient();
-    c.connectionTimeout = const Duration(seconds: 10);
-    try {
-      final r = await c.openUrl(method, Uri.parse('$sbUrl/rest/v1/$path'));
-      r.headers.set('apikey', sbKey);
-      if (sbKey.startsWith('eyJ')) r.headers.set('authorization', 'Bearer $sbKey');
-      r.headers.set('content-type', 'application/json');
-      r.headers.set('accept', 'application/json');
-      if (body != null) r.add(utf8.encode(jsonEncode(body)));
-      final res = await r.close().timeout(Duration(seconds: timeout));
-      final text = await res.transform(utf8.decoder).join();
-      if (res.statusCode >= 400) throw HttpException('${res.statusCode} $text');
-      return text.isEmpty ? null : jsonDecode(text);
-    } finally {
-      c.close(force: true);
-    }
-  }
-
-  static Map<String, dynamic> _cfg(Map e) => {
-        'id': '${e['id']}',
-        'name': '${e['name'] ?? ''}',
-        'quotaGb': e['quota_gb'] ?? 0,
-        'expires': '${e['expires'] ?? ''}',
-        'link': '${e['link'] ?? ''}',
-        'protocol': '${e['protocol'] ?? ''}',
-        'transport': '${e['transport'] ?? ''}',
-        'country': '${e['country'] ?? ''}',
-        'code': '${e['code'] ?? ''}',
-      };
+  static String lastSyncError = '';
+  static int _cfgGen = 0;
+  static String lastEventError = '';
 
   static Future<Map<String, dynamic>?> fetchConfig({String? id}) async {
-    if (!await sync()) return null;
     final l = Store.configs.value;
     if (l.isEmpty) return null;
     if (id != null && id.isNotEmpty) {
@@ -151,79 +117,17 @@ class Api {
     return l.first;
   }
 
-  static const String _cols = 'configs?select=id,name,quota_gb,expires,link,protocol,transport,country,code&enabled=eq.true&order=created_at.asc&limit=500';
-
-  // country/code عمداً در امضا نیست: fillGeo آن را روی لیست محلی پر می‌کند و اگر در امضا بود
-  // هر ۳ ثانیه لیست ریست و دوباره پر می‌شد (چشمک و ناپدید شدن موقت کانفیگ‌ها)
-  static String _sig(List<Map<String, dynamic>> l) => l.map((e) => '${e['id']}|${e['link']}|${e['name']}|${e['quotaGb']}|${e['expires']}').join(',');
-
-  // بعد از افزودن/حذف سرور شخصی: لیست ادمین را بلافاصله و بی‌قید به امضا دوباره زنده از دیتابیس می‌گیرد
   static Future<void> refreshConfigs() async {
-    final g = ++_cfgGen;
-    try {
-      final list = await _fetchServerConfigs(timeout: 10);
-      if (g != _cfgGen) return;
-      await Store.setConfigs(list);
-      if (list.isNotEmpty) unawaited(fillGeo());
-    } catch (_) {}
+    if (Store.configs.value.isNotEmpty) unawaited(fillGeo());
   }
 
-  // فقط زنده از دیتابیس و با کلید anon/publishable که در بیلدر گذاشته شده؛ هیچ فایل/کش محلی خوانده نمی‌شود
-  static int _cfgGen = 0;
-  static String lastSyncError = '';
-  static String _short(Object e) {
-    final t = '$e'.replaceFirst('HttpException: ', '');
-    return t.length > 120 ? t.substring(0, 120) : t;
-  }
+  static Future<void> pollConfigs() async {}
 
-  static Future<List<Map<String, dynamic>>> _fetchServerConfigs({int timeout = 15}) async {
-    dynamic r;
-    try {
-      r = await _sb('GET', _cols, timeout: timeout);
-    } catch (e1) {
-      try {
-        r = await _sb('POST', 'rpc/get_public_configs', body: {}, timeout: timeout);
-      } catch (e2) {
-        lastSyncError = _short(e1);
-        rethrow;
-      }
-    }
-    lastSyncError = '';
-    return (r as List).map((e) => _cfg(e as Map)).where((e) => !'${e['id']}'.startsWith('default-')).toList();
-  }
-
-  // بررسی بی‌صدا و سریع؛ حذف/تغییر کانفیگ از اپ ادمین بلافاصله روی همه‌ی کاربران اعمال می‌شود
-  static bool _polling = false;
-  static Future<void> pollConfigs() async {
-    if (_polling) return;
-    _polling = true;
-    final g = ++_cfgGen;
-    try {
-      final list = await _fetchServerConfigs(timeout: 8);
-      if (g != _cfgGen) return;
-      if (_sig(list) == _sig(Store.serverConfigs)) return;
-      await Store.setConfigs(list);
-      if (list.isNotEmpty) unawaited(fillGeo());
-    } catch (_) {
-    } finally {
-      _polling = false;
-    }
-  }
+  static Future<List<Map<String, dynamic>>?> fetchCores() async => null;
 
   static Future<bool> sync() async {
-    unawaited(event({'type': 'hello'})); // کاربر حتی اگر خواندن کانفیگ‌ها شکست خورد ثبت شود
-    final g = ++_cfgGen;
-    try {
-      final list = await _fetchServerConfigs();
-      if (g != _cfgGen) return true;
-      event({'type': 'hello'});
-      await Store.setConfigs(list);
-      if (list.isNotEmpty) unawaited(fillGeo());
-      return true;
-    } catch (e) {
-      if (lastSyncError.isEmpty) lastSyncError = _short(e);
-      return false;
-    }
+    if (Store.configs.value.isNotEmpty) unawaited(fillGeo());
+    return true;
   }
 
   static Future<bool> reach({String? proxy}) async {
@@ -241,95 +145,15 @@ class Api {
     return Store.configs.value;
   }
 
-  static final List<Map<String, dynamic>> _pendingEvents = [];
-  static bool _flushing = false;
-  static String lastEventError = '';
+  static Future<void> logError(String area, String code, {String detail = '', String config = ''}) async {}
 
-  static Future<void> _sendEvent(Map<String, dynamic> d) async {
-    await _sb('POST', 'rpc/report_event', body: {
-      'p_device': Store.deviceId,
-      'p_platform': Platform.operatingSystem,
-      'p_type': '${d['type'] ?? 'hello'}',
-      'p_session': '${d['session'] ?? ''}',
-      'p_protocol': '${d['protocol'] ?? ''}',
-      'p_transport': '${d['transport'] ?? ''}',
-      'p_country': '${d['country'] ?? ''}',
-      'p_config': '${d['configId'] ?? ''}',
-      'p_up': (d['up'] as num?)?.toInt() ?? 0,
-      'p_down': (d['down'] as num?)?.toInt() ?? 0,
-      'p_seconds': (d['seconds'] as num?)?.toInt() ?? 0,
-    }, timeout: 12);
-  }
+  static Future<void> event(Map<String, dynamic> d) async {}
 
-  static Future<void> _flushPending() async {
-    if (_flushing || _pendingEvents.isEmpty) return;
-    _flushing = true;
-    try {
-      while (_pendingEvents.isNotEmpty) {
-        await _sendEvent(_pendingEvents.first);
-        _pendingEvents.removeAt(0);
-      }
-    } catch (_) {
-    } finally {
-      _flushing = false;
-    }
-  }
+  static Future<void> reportFirefox(List<Map<String, dynamic>> accounts) async {}
 
-  static Future<void> event(Map<String, dynamic> d) async {
-    final t = '${d['type'] ?? 'hello'}';
-    for (var i = 0; i < 2; i++) {
-      try {
-        await _sendEvent(d);
-        lastEventError = '';
-        unawaited(_flushPending());
-        return;
-      } catch (e) {
-        lastEventError = '$e';
-        if (i == 0) await Future.delayed(const Duration(seconds: 2));
-      }
-    }
-    if (t == 'connect' || t == 'disconnect') {
-      if (_pendingEvents.length >= 40) _pendingEvents.removeAt(0);
-      _pendingEvents.add(Map<String, dynamic>.from(d));
-    }
-  }
+  static Future<void> forgetFirefox(String accId) async {}
 
-  // گزارش آمار اکانت‌های Firefox برای پنل ادمین (ایمیل ماسک‌شده؛ بی‌صدا و بدون خطا)
-  static Future<void> reportFirefox(List<Map<String, dynamic>> accounts) async {
-    try {
-      await _sb('POST', 'rpc/report_firefox', body: {'p_device': Store.deviceId, 'p_accounts': accounts}, timeout: 10);
-    } catch (_) {}
-  }
-
-  static Future<bool> saveBackup(String id, String blob) async {
-    try {
-      final r = await _sb('POST', 'rpc/save_user_backup', body: {'p_id': id, 'p_blob': blob, 'p_device': Store.deviceId}, timeout: 25);
-      return r == true;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  static Future<String?> loadBackup(String id) async {
-    final r = await _sb('POST', 'rpc/load_user_backup', body: {'p_id': id}, timeout: 25);
-    return r is String ? r : null;
-  }
-
-  static Future<void> forgetFirefox(String accId) async {
-    try {
-      await _sb('POST', 'rpc/forget_firefox', body: {'p_device': Store.deviceId, 'p_acc': accId}, timeout: 10);
-    } catch (_) {}
-  }
-
-  // تنظیمات عمومی برنامه که از پنل ادمین ذخیره می‌شود (مثلاً github_token برای خواندن ریلیزها)
-  static Future<String> appSetting(String key) async {
-    try {
-      final r = await _sb('POST', 'rpc/get_app_setting', body: {'p_key': key}, timeout: 8);
-      return r == null ? '' : '$r'.trim();
-    } catch (_) {
-      return '';
-    }
-  }
+  static Future<String> appSetting(String key) async => '';
 
   static Future<int> pingLink(String link, {int timeoutSec = 4}) async {
     try {
@@ -356,8 +180,8 @@ class Api {
     }
   }
 
-  // پینگ معتبر: بین ۱ تا ۳۰۰۰ میلی‌ثانیه. صفر، منفی یا بیشتر از ۳ ثانیه یعنی نامعتبر.
-  static bool validPing(int ms) => ms >= 1 && ms <= 3000;
+  // پینگ معتبر: بین ۱ تا ۱۲۰۰۰ میلی‌ثانیه (Timeout هسته‌ی V2rayNG ۱۲ ثانیه است). صفر یا منفی یعنی Timeout.
+  static bool validPing(int ms) => ms >= 1 && ms <= 12000;
 
   // پینگ واقعی (دو اتصال TCP پشت سر هم به پورت سرور)؛ اگر هرکدام شکست بخورد یا عدد نامعتبر باشد -1
   static Future<int> realPing(String link, {int timeoutSec = 3}) async {
@@ -372,7 +196,7 @@ class Api {
   // زمان کل درخواست تا رسیدن پاسخ generate_204 به میلی‌ثانیه، یا -1 اگر شکست خورد.
   // سریع: پینگ بالای ۳ ثانیه ویلید نیست، پس Timeout فقط ۴ ثانیه است؛ آدرس دوم (پشتیبان) فقط اگر اولی
   // ~۹۰۰ms جواب نداد موازی شروع می‌شود و هر کدام زودتر جواب داد برنده است (به‌جای ۸+۸ ثانیه انتظار پشت‌سرهم).
-  static Future<int> delayVia(String proxy, {int timeoutSec = 4}) {
+  static Future<int> delayVia(String proxy, {int timeoutSec = 3}) {
     const urls = ['http://cp.cloudflare.com/generate_204', 'http://www.gstatic.com/generate_204'];
     final done = Completer<int>();
     var failed = 0;
@@ -394,11 +218,11 @@ class Api {
   }
 
   // تأخیر واقعی اینترنت از داخل تونل (میلی‌ثانیه) یا -1
-  static Future<int> reachMs({String? proxy}) async {
+  static Future<int> reachMs({String? proxy, int timeout = 8}) async {
     for (final u in ['http://cp.cloudflare.com/generate_204', 'https://www.gstatic.com/generate_204']) {
       final sw = Stopwatch()..start();
       try {
-        await _request('GET', u, proxy: proxy, timeout: 8);
+        await _request('GET', u, proxy: proxy, timeout: timeout);
         sw.stop();
         return max(1, sw.elapsedMilliseconds);
       } catch (_) {}

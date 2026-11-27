@@ -24,7 +24,7 @@ for name in ('build.gradle.kts', 'build.gradle'):
     g = open(path, encoding='utf8').read()
     min_sdk = 'minSdk = 23' if kts else 'minSdkVersion 23'
     g = re.sub(r'minSdk(Version)?\s*=?\s*(flutter\.minSdkVersion|\d+)', lambda m: min_sdk, g, count=1)
-    packaging = 'packaging { jniLibs { useLegacyPackaging = true } }' if kts else 'packagingOptions { jniLibs { useLegacyPackaging = true } }'
+    packaging = 'packaging { jniLibs { useLegacyPackaging = true; keepDebugSymbols.add("**/libsingbox.so") } }' if kts else 'packagingOptions { jniLibs { useLegacyPackaging = true; keepDebugSymbols.add("**/libsingbox.so") } }'
     g = re.sub(r'(android\s*\{)', lambda m: m.group(1) + '\n    ' + packaging, g, count=1)
     open(path, 'w', encoding='utf8').write(g)
 

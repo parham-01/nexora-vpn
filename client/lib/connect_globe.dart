@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart' show Ticker;
 import 'api.dart';
 import 'dns_tunnel.dart';
+import 'firefox/flag_colors.dart';
 import 'geo_atlas.dart';
 import 'store.dart';
 import 'vpn_service.dart';
@@ -119,6 +120,14 @@ class _GlobeModel {
   double crack = 0, split = 0, fall = 0, flash = 0, tint = 0;
   double pulse = 0;
   GeoCountry? country;
+  String flagCode = ''; // رنگ پرچم کشور مقصد برای پر کردن خاک روی کره
+  // لوکیشن قبلی (مبدأ) و پیشرفت نوار سبز تا لوکیشن جدید
+  bool hasOrigin = false;
+  double oLon = 0, oLat = 0; // رادیان
+  double tLon = 0, tLat = 0; // رادیان (مقصد)
+  double link = 0; // 0..1 طول نوار سبز
+  double stream = 0; // جریان ذرات راست به چپ در حال اتصال
+  double appear = 0; // ظاهر شدن کره
 }
 
 enum _Mode { working, pendingOk, ok, fail }
@@ -140,11 +149,15 @@ class _ConnectGlobePageState extends State<ConnectGlobePage> with SingleTickerPr
 
   _Mode _mode = _Mode.working;
   double _t = 0, _modeAt = 0;
-  double _fromLon = 0, _fromLat = 0, _toLon = 0, _toLat = 0;
+  double _fromLon = 0, _fromLat = 0, _toLon = 0, _toLat = 0, _midLon = 0, _midLat = 0;
   bool _hasTarget = false;
   bool _showName = false, _showFail = false, _closed = false, _cancelling = false;
   String _name = '', _code = '', _err = '';
   GeoCountry? _country;
+  // مبدأ: لوکیشن واقعی/قبلی کاربر قبل از اتصال
+  double _homeLon = 0, _homeLat = 0;
+  bool _hasHome = false;
+  String _homeCode = '';
 
   static const List<String> _heads = [
     'در حال ساخت تونل شخصی…',
@@ -157,6 +170,7 @@ class _ConnectGlobePageState extends State<ConnectGlobePage> with SingleTickerPr
   void initState() {
     super.initState();
     GeoAtlas.preload();
+    _resolveHome();
     _tk = createTicker(_onTick)..start();
     widget.ctl.outcome.addListener(_onOutcome);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -167,9 +181,41 @@ class _ConnectGlobePageState extends State<ConnectGlobePage> with SingleTickerPr
   @override
   void dispose() {
     widget.ctl.outcome.removeListener(_onOutcome);
+    GeoAtlas.ready.removeListener(_applyHome);
     _tk.dispose();
     _rev.dispose();
     super.dispose();
+  }
+
+  // مبدأ: اول کش «کشور واقعی کاربر» که از اتصال‌های قبلی ذخیره شده، بعد یک استعلام مستقیم سریع.
+  Future<void> _resolveHome() async {
+    var code = Store.getStr('homeGeoCode');
+    if (code.length != 2) {
+      try {
+        final g = await Api.geo(attempts: 1);
+        if (g != null && g.code.length == 2) {
+          code = g.code.toUpperCase();
+          await Store.setStr('homeGeoCode', code);
+        }
+      } catch (_) {}
+    }
+    if (code.length != 2) code = 'IR';
+    _homeCode = code;
+    _applyHome();
+  }
+
+  void _applyHome() {
+    final atlas = GeoAtlas.ready.value;
+    if (atlas == null) {
+      GeoAtlas.ready.addListener(_applyHome);
+      return;
+    }
+    GeoAtlas.ready.removeListener(_applyHome);
+    final co = atlas.byCode(_homeCode);
+    if (co == null) return;
+    _homeLon = co.cLon * pi / 180;
+    _homeLat = (co.cLat * pi / 180).clamp(-1.2, 1.2).toDouble();
+    _hasHome = true;
   }
 
   double _ease(double p) {
@@ -185,25 +231,39 @@ class _ConnectGlobePageState extends State<ConnectGlobePage> with SingleTickerPr
     final m = _m;
     m.t = t;
     m.pulse = (t * 0.7) % 1.0;
+    m.appear = min(1.0, m.appear + dt * 1.4);
+    m.hasOrigin = _hasHome;
+    m.oLon = _homeLon;
+    m.oLat = _homeLat;
     switch (_mode) {
       case _Mode.working:
       case _Mode.pendingOk:
+        // چرخش: سطح کره از راست به چپ می‌رود
         m.lon += dt * 0.42;
-        m.lat += (0.38 - m.lat) * min(1.0, dt * 2);
+        m.lat += (0.34 - m.lat) * min(1.0, dt * 2);
+        m.stream = (m.stream + dt * 0.9) % 1.0;
+        m.link = 0;
         if (_mode == _Mode.pendingOk) _tryResolve();
         break;
       case _Mode.ok:
-        final p = ((t - _modeAt) / 2.4).clamp(0.0, 1.0).toDouble();
+        final p = ((t - _modeAt) / 2.6).clamp(0.0, 1.0).toDouble();
         final e = _ease(p);
         if (_hasTarget) {
-          m.lon = _fromLon + (_toLon - _fromLon) * e;
-          m.lat = _fromLat + (_toLat - _fromLat) * e;
+          // منحنی بزیه‌ی درجه ۲ که از نقطه‌ی میانی مسیر عبور می‌کند
+          final cLon = 2 * _midLon - (_fromLon + _toLon) / 2;
+          final cLat = 2 * _midLat - (_fromLat + _toLat) / 2;
+          final q = 1 - e;
+          m.lon = q * q * _fromLon + 2 * q * e * cLon + e * e * _toLon;
+          m.lat = q * q * _fromLat + 2 * q * e * cLat + e * e * _toLat;
         } else {
           m.lon += dt * 0.3;
         }
-        m.hl = ((t - _modeAt - 1.3) / 0.9).clamp(0.0, 1.0).toDouble();
-        if (!_showName && t - _modeAt > 1.5) setState(() => _showName = true);
-        if (t - _modeAt > 5.4) _close();
+        // نوار سبز از لوکیشن قبلی تا لوکیشن جدید (از راست به چپ رسم می‌شود)
+        m.link = _hasHome && _hasTarget ? ((t - _modeAt - 0.15) / 1.9).clamp(0.0, 1.0).toDouble() : 0;
+        m.stream = (m.stream + dt * 0.7) % 1.0;
+        m.hl = ((t - _modeAt - 1.5) / 0.9).clamp(0.0, 1.0).toDouble();
+        if (!_showName && t - _modeAt > 1.7) setState(() => _showName = true);
+        if (t - _modeAt > 5.8) _close();
         break;
       case _Mode.fail:
         final c = t - _modeAt;
@@ -266,17 +326,47 @@ class _ConnectGlobePageState extends State<ConnectGlobePage> with SingleTickerPr
     _country = co;
     _name = name;
     _code = code;
+    if (!pm && code.length == 2 && code.toUpperCase() == _homeCode.toUpperCase()) {
+      // استعلام اولیه احتمالاً بعد از بالا آمدن تونل بوده؛ مبدأ معتبر نیست.
+      _hasHome = false;
+      Store.setStr('homeGeoCode', '');
+    }
     _m.country = co;
+    _m.flagCode = code;
     if (co != null) {
       _fromLon = _m.lon;
       _fromLat = _m.lat;
-      var target = co.cLon * pi / 180;
-      var delta = (target - _fromLon) % (2 * pi);
-      if (delta > pi) delta -= 2 * pi;
-      if (delta < -pi) delta += 2 * pi;
-      if (delta.abs() < 1.2) delta += (delta >= 0 ? 1 : -1) * 2 * pi;
-      _toLon = _fromLon + delta;
-      _toLat = (co.cLat * pi / 180).clamp(-0.95, 0.95).toDouble();
+      final target = co.cLon * pi / 180;
+      final tlat = (co.cLat * pi / 180).clamp(-0.95, 0.95).toDouble();
+      _m.tLon = target;
+      _m.tLat = tlat;
+      _toLat = tlat;
+      if (_hasHome && !(code.toUpperCase() == _homeCode.toUpperCase())) {
+        // دوربین از وسط مسیر مبدأ→مقصد رد می‌شود تا کل نوار سبز دیده شود
+        final ma = cos(_homeLat) * sin(_homeLon) + cos(tlat) * sin(target);
+        final mb = cos(_homeLat) * cos(_homeLon) + cos(tlat) * cos(target);
+        final ms = sin(_homeLat) + sin(tlat);
+        final ml = sqrt(ma * ma + mb * mb + ms * ms);
+        var midLon = target, midLat = tlat;
+        if (ml > 1e-3) {
+          midLon = atan2(ma, mb);
+          midLat = asin((ms / ml).clamp(-1.0, 1.0).toDouble()).clamp(-0.95, 0.95).toDouble();
+        }
+        // همیشه شرق‌سو می‌چرخد تا سطح کره از راست به چپ برود
+        var d1 = (midLon - _fromLon) % (2 * pi);
+        if (d1 < 0.8) d1 += 2 * pi;
+        _midLon = _fromLon + d1;
+        _midLat = midLat;
+        var d2 = (target - _midLon) % (2 * pi);
+        if (d2 > pi) d2 -= 2 * pi;
+        _toLon = _midLon + d2;
+      } else {
+        var delta = (target - _fromLon) % (2 * pi);
+        if (delta < 1.6) delta += 2 * pi;
+        _toLon = _fromLon + delta;
+        _midLon = (_fromLon + _toLon) / 2;
+        _midLat = (_fromLat + _toLat) / 2;
+      }
       _hasTarget = true;
     }
     setState(() {
@@ -528,19 +618,19 @@ class _ConnectGlobePageState extends State<ConnectGlobePage> with SingleTickerPr
             textDirection: TextDirection.ltr,
             child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
               if (co != null) ...[
-                SizedBox(width: 74, height: 74, child: CustomPaint(painter: CountryShapePainter(co, _kGreen))),
-                const SizedBox(width: 14),
+                CountryFlagCard(country: co, code: _code, size: 104),
+                const SizedBox(width: 18),
               ],
               Flexible(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
                   FittedBox(
                     fit: BoxFit.scaleDown,
                     alignment: Alignment.centerLeft,
-                    child: Text(_name.isEmpty ? (widget.ctl.pingMode ? 'Best server' : 'Connected') : _name,
+                    child: Text(_name.isEmpty ? (widget.ctl.pingMode ? 'Best Server' : 'Connected') : _name,
                         style: const TextStyle(color: Colors.white, fontSize: 34, fontWeight: FontWeight.w900, letterSpacing: 1.2)),
                   ),
                   const SizedBox(height: 2),
-                  Text(widget.ctl.pingMode ? '$flag  ${widget.ctl.sub}' : '$flag  CONNECTED', style: const TextStyle(color: _kGreen, fontSize: 13, letterSpacing: 3, fontWeight: FontWeight.w700)),
+                  Text(widget.ctl.pingMode ? widget.ctl.sub : '$flag  CONNECTED', style: const TextStyle(color: _kGreen, fontSize: 13, letterSpacing: 3, fontWeight: FontWeight.w700)),
                 ]),
               ),
             ]),
@@ -572,20 +662,30 @@ class _ConnectGlobePageState extends State<ConnectGlobePage> with SingleTickerPr
   }
 }
 
-// ----------------------------- نقاشی کره -----------------------------
+// ----------------------------- نقاشی کره (سه‌بعدی) -----------------------------
 
 class _GlobePainter extends CustomPainter {
   final _GlobeModel m;
   final bool lite;
   late final List<Float32List> _gr;
-  Float32List? _buf;
-  GeoAtlas? _bufFor;
+  final List<Float32List?> _bins = <Float32List?>[null, null, null, null];
+  GeoAtlas? _binsFor;
+
+  late final Float32List _clouds;
 
   _GlobePainter(this.m, Listenable repaint, this.lite) : super(repaint: repaint) {
     _gr = _grat();
+    final rnd = Random(11);
+    final n = lite ? 26 : 56;
+    final s = Float32List(n * 4);
+    for (var i = 0; i < n; i++) {
+      s[i * 4] = rnd.nextDouble() * 6.283 - 3.1416;
+      s[i * 4 + 1] = asin(rnd.nextDouble() * 1.7 - 0.85);
+      s[i * 4 + 2] = 0.07 + rnd.nextDouble() * 0.11;
+      s[i * 4 + 3] = 0.5 + rnd.nextDouble() * 0.5;
+    }
+    _clouds = s;
   }
-
-  static const List<double> _j = [0.0, 0.35, -0.55, 0.3, -0.25, 0.6, -0.45, 0.15, -0.6, 0.5, -0.3, 0.55, -0.4, 0.25, 0.0];
 
   List<Float32List> _grat() {
     final out = <Float32List>[];
@@ -618,220 +718,191 @@ class _GlobePainter extends CustomPainter {
     return out;
   }
 
-  List<Offset> _zig(Offset c, double r) {
-    final n = _j.length - 1;
-    return [for (var i = 0; i <= n; i++) Offset(c.dx + _j[i] * r * 0.18, c.dy - r * 1.1 + r * 2.2 * i / n)];
-  }
-
   @override
   void paint(Canvas canvas, Size size) {
     final w = size.width, h = size.height;
-    _stars(canvas, size);
+    _space(canvas, size);
     final reserve = min(h * 0.46, 330.0);
     final avail = max(140.0, h - reserve - 56);
-    final r = min(w * 0.40, avail / 2 * 0.95);
+    final r0 = min(w * 0.40, avail / 2 * 0.95);
     final c = Offset(w / 2, 56 + avail / 2);
     final tint = Color.lerp(_kBlue, _kRed, max(m.crack, m.tint))!;
-    if (m.crack <= 0) {
-      _globe(canvas, c, r, tint);
-      if (m.flash > 0) canvas.drawCircle(c, r, Paint()..color = Colors.white.withOpacity(m.flash * 0.35));
-      return;
-    }
-    final zig = _zig(c, r);
+    final ap = Curves.easeOutCubic.transform(m.appear.clamp(0.0, 1.0).toDouble());
+    final r = r0 * (0.84 + 0.16 * ap);
     canvas.save();
-    if (m.crack < 1 && m.fall <= 0) {
-      final s = sin(m.t * 70) * r * 0.012 * (1 - m.crack);
-      canvas.translate(s, s * 0.6);
-    }
-    if (m.split <= 0) {
-      _globe(canvas, c, r, tint);
-      _crackLine(canvas, c, r, zig, m.crack, true);
-    } else {
-      final fd = (h - c.dy) + r * 1.6;
-      final f2 = m.fall * m.fall;
-      final gap = r * 0.035 * m.split;
-      final left = Path()..moveTo(c.dx - 3 * r, c.dy - 1.4 * r);
-      final right = Path()..moveTo(c.dx + 3 * r, c.dy - 1.4 * r);
-      for (final z in zig) {
-        left.lineTo(z.dx, z.dy);
-        right.lineTo(z.dx, z.dy);
-      }
-      left
-        ..lineTo(c.dx - 3 * r, c.dy + 1.4 * r)
-        ..close();
-      right
-        ..lineTo(c.dx + 3 * r, c.dy + 1.4 * r)
-        ..close();
-      _half(canvas, left, c, r, tint, zig, Offset(c.dx - r * 0.45, c.dy), -gap - r * 0.3 * f2, fd * f2, -0.9 * f2);
-      _half(canvas, right, c, r, tint, zig, Offset(c.dx + r * 0.45, c.dy), gap + r * 0.4 * f2, fd * f2 * 1.08, 1.1 * f2);
-      if (m.fall > 0) _shards(canvas, c, r, fd);
-    }
+    // نفس آرام کره
+    final br = 1.0 + 0.006 * sin(m.t * 1.3);
+    canvas.translate(c.dx, c.dy);
+    canvas.scale(br, br);
+    canvas.translate(-c.dx, -c.dy);
+    _globe(canvas, c, r, tint);
     canvas.restore();
     if (m.flash > 0) canvas.drawCircle(c, r, Paint()..color = Colors.white.withOpacity(m.flash * 0.35));
   }
 
-  void _half(Canvas canvas, Path clip, Offset c, double r, Color tint, List<Offset> zig, Offset pivot, double dx, double dy, double ang) {
-    canvas.save();
-    canvas.translate(pivot.dx + dx, pivot.dy + dy);
-    canvas.rotate(ang);
-    canvas.translate(-pivot.dx, -pivot.dy);
-    canvas.clipPath(clip);
-    _globe(canvas, c, r, tint);
-    _crackLine(canvas, c, r, zig, 1.0, false);
-    canvas.restore();
+  void _blob(Canvas canvas, Offset o, double rad, Color col) {
+    canvas.drawCircle(
+      o,
+      rad,
+      Paint()
+        ..shader = RadialGradient(colors: [col, col.withOpacity(0)]).createShader(Rect.fromCircle(center: o, radius: rad)),
+    );
   }
 
-  void _crackLine(Canvas canvas, Offset c, double r, List<Offset> zig, double crack, bool clip) {
-    final n = zig.length - 1;
-    final mid = n ~/ 2;
-    final k = crack * mid;
-    final whole = k.floor();
-    final frac = k - whole;
-    final lo = max(0, mid - whole);
-    final hi = min(n, mid + whole);
-    Offset start = zig[lo];
-    Offset end = zig[hi];
-    if (lo > 0 && frac > 0) {
-      final a = zig[lo], b = zig[lo - 1];
-      start = Offset(a.dx + (b.dx - a.dx) * frac, a.dy + (b.dy - a.dy) * frac);
-    }
-    if (hi < n && frac > 0) {
-      final a = zig[hi], b = zig[hi + 1];
-      end = Offset(a.dx + (b.dx - a.dx) * frac, a.dy + (b.dy - a.dy) * frac);
-    }
-    final path = Path()..moveTo(start.dx, start.dy);
-    if (lo > 0 && frac > 0) path.lineTo(zig[lo].dx, zig[lo].dy);
-    for (var i = lo + 1; i <= hi; i++) {
-      path.lineTo(zig[i].dx, zig[i].dy);
-    }
-    if (hi < n && frac > 0) path.lineTo(end.dx, end.dy);
-    canvas.save();
-    if (clip) canvas.clipPath(Path()..addOval(Rect.fromCircle(center: c, radius: r)));
-    canvas.drawPath(
-      path,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = r * 0.07
-        ..strokeJoin = StrokeJoin.round
-        ..color = _kRed.withOpacity(0.35)
-        ..maskFilter = lite ? null : MaskFilter.blur(BlurStyle.normal, r * 0.04),
-    );
-    canvas.drawPath(
-      path,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 3.4
-        ..strokeJoin = StrokeJoin.round
-        ..color = Colors.white.withOpacity(0.95),
-    );
-    canvas.drawPath(
-      path,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.4
-        ..strokeJoin = StrokeJoin.round
-        ..color = _kRed,
-    );
-    canvas.restore();
-  }
+  void _space(Canvas canvas, Size size) {}
 
-  void _shards(Canvas canvas, Offset c, double r, double fd) {
-    final rnd = Random(11);
-    final f = m.fall;
-    for (var i = 0; i < 18; i++) {
-      final bx = c.dx + (rnd.nextDouble() * 2 - 1) * r * 0.3;
-      final by = c.dy + (rnd.nextDouble() * 2 - 1) * r * 0.95;
-      final vx = (rnd.nextDouble() * 2 - 1) * r * 0.9;
-      final sz = r * (0.04 + rnd.nextDouble() * 0.06);
-      final spin = (rnd.nextDouble() * 2 - 1) * 6;
-      final sp = 0.6 + rnd.nextDouble() * 0.5;
-      canvas.save();
-      canvas.translate(bx + vx * f, by + fd * sp * f * f);
-      canvas.rotate(spin * f);
-      final tri = Path()
-        ..moveTo(0, -sz)
-        ..lineTo(sz * 0.9, sz * 0.7)
-        ..lineTo(-sz * 0.8, sz * 0.6)
-        ..close();
-      canvas.drawPath(tri, Paint()..color = Color.lerp(_kBlue, _kRed, 0.5)!.withOpacity(max(0.0, 1 - f * 0.6)));
-      canvas.restore();
-    }
-  }
-
-  void _stars(Canvas canvas, Size size) {
-    if (lite) return;
-    final rnd = Random(5);
-    final p = Paint();
-    for (var i = 0; i < 46; i++) {
-      final x = rnd.nextDouble() * size.width;
-      final y = rnd.nextDouble() * size.height;
-      final ph = rnd.nextDouble() * 6.28;
-      final rad = 0.6 + rnd.nextDouble() * 1.1;
-      p.color = Colors.white.withOpacity(0.18 + 0.22 * (0.5 + 0.5 * sin(m.t * 1.6 + ph)));
-      canvas.drawCircle(Offset(x, y), rad, p);
+  void _cloudLayer(Canvas canvas, Offset c, double r, double cl0, double sl0, double cp0, double sp0) {
+    final n = _clouds.length ~/ 4;
+    final drift = m.t * 0.03;
+    for (var i = 0; i < n; i++) {
+      final la = _clouds[i * 4] + drift;
+      final fa = _clouds[i * 4 + 1];
+      final cf = cos(fa);
+      final a = cf * sin(la), b = cf * cos(la), s = sin(fa);
+      final t1 = b * cl0 + a * sl0;
+      final z = sp0 * s + cp0 * t1;
+      if (z <= 0.04) continue;
+      final x = a * cl0 - b * sl0;
+      final y = cp0 * s - sp0 * t1;
+      final o = Offset(c.dx + r * x, c.dy - r * y);
+      final rad = r * _clouds[i * 4 + 2] * (0.45 + 0.55 * z);
+      final al = 0.17 * _clouds[i * 4 + 3] * z;
+      for (var k = 0; k < 3; k++) {
+        final oo = o + Offset((k - 1) * rad * 0.7, (k == 1 ? -0.15 : 0.12) * rad);
+        _blob(canvas, oo, rad, Colors.white.withOpacity(al));
+      }
     }
   }
 
   void _globe(Canvas canvas, Offset c, double r, Color tint) {
     final rect = Rect.fromCircle(center: c, radius: r);
-    if (!lite) {
-      canvas.drawCircle(
-        c,
-        r * 1.22,
-        Paint()
-          ..shader = RadialGradient(
-            colors: [tint.withOpacity(0.30), tint.withOpacity(0.0)],
-            stops: const [0.74, 1.0],
-          ).createShader(Rect.fromCircle(center: c, radius: r * 1.22)),
-      );
-    }
+    final cl0 = cos(m.lon), sl0 = sin(m.lon), cp0 = cos(m.lat), sp0 = sin(m.lat);
+
+    // هاله‌ی اتمسفر بیرونی
+    final gr = r * 1.38;
+    canvas.drawCircle(
+      c,
+      gr,
+      Paint()
+        ..shader = RadialGradient(
+          colors: [tint.withOpacity(lite ? 0.28 : 0.55), tint.withOpacity(0.16), tint.withOpacity(0.0)],
+          stops: const [0.72, 0.80, 1.0],
+        ).createShader(Rect.fromCircle(center: c, radius: gr)),
+    );
+
+    // مدار و ذرات پشت کره
+    if (!lite) _orbit(canvas, c, r, tint, false);
+
+    // بدنه‌ی کره
     canvas.drawCircle(
       c,
       r,
       Paint()
         ..shader = const RadialGradient(
-          center: Alignment(-0.35, -0.4),
-          radius: 1.0,
-          colors: [Color(0xFF14408A), Color(0xFF081D47), Color(0xFF030A1E)],
-          stops: [0.0, 0.62, 1.0],
+          center: Alignment(-0.4, -0.45),
+          radius: 1.05,
+          colors: [Color(0xFF2B86E8), Color(0xFF123F96), Color(0xFF071A4A), Color(0xFF030A24)],
+          stops: [0.0, 0.42, 0.78, 1.0],
         ).createShader(rect),
     );
+
     canvas.save();
     canvas.clipPath(Path()..addOval(rect));
-    final cl0 = cos(m.lon), sl0 = sin(m.lon), cp0 = cos(m.lat), sp0 = sin(m.lat);
     _graticule(canvas, c, r, cl0, sl0, cp0, sp0, tint);
     final atlas = GeoAtlas.ready.value;
     if (atlas != null) {
       _dots(canvas, c, r, atlas, cl0, sl0, cp0, sp0, tint);
       if (!lite) _borders(canvas, c, r, atlas, cl0, sl0, cp0, sp0, tint);
       _highlight(canvas, c, r, cl0, sl0, cp0, sp0);
+      _cloudLayer(canvas, c, r, cl0, sl0, cp0, sp0);
+    }
+    // سایه‌ی ترمیناتور برای حس حجم
+    canvas.drawCircle(
+      c,
+      r,
+      Paint()
+        ..shader = const RadialGradient(
+          center: Alignment(-0.5, -0.55),
+          radius: 1.3,
+          colors: [Color(0x00000000), Color(0x00000000), Color(0xB3020510)],
+          stops: [0.0, 0.5, 1.0],
+        ).createShader(rect),
+    );
+    // لبه‌ی درخشان (Fresnel)
+    canvas.drawCircle(
+      c,
+      r,
+      Paint()
+        ..shader = RadialGradient(
+          colors: [tint.withOpacity(0), tint.withOpacity(0), tint.withOpacity(lite ? 0.35 : 0.65)],
+          stops: const [0.0, 0.78, 1.0],
+        ).createShader(rect),
+    );
+    // درخشش نور (specular) بالا-چپ
+    if (!lite) {
+      final sp = Offset(c.dx - r * 0.42, c.dy - r * 0.46);
+      _blob(canvas, sp, r * 0.55, Colors.white.withOpacity(0.10));
     }
     canvas.restore();
+
     canvas.drawCircle(
       c,
       r,
       Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.6
-        ..color = tint.withOpacity(0.8),
+        ..strokeWidth = 1.4
+        ..color = tint.withOpacity(0.85),
     );
+
     if (!lite) {
-      canvas.save();
-      canvas.translate(c.dx, c.dy);
-      canvas.rotate(-0.38);
-      canvas.drawOval(
-        Rect.fromCenter(center: Offset.zero, width: r * 2.55, height: r * 0.78),
+      canvas.drawCircle(
+        c,
+        r * 1.012,
         Paint()
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 0.9
-          ..color = tint.withOpacity(0.22),
+          ..strokeWidth = r * 0.07
+          ..color = Color.lerp(tint, Colors.white, 0.35)!.withOpacity(0.38)
+          ..maskFilter = MaskFilter.blur(BlurStyle.normal, r * 0.05),
       );
-      final ang = m.t * 0.9;
-      final o = Offset(cos(ang) * r * 1.275, sin(ang) * r * 0.39);
-      canvas.drawCircle(o, r * 0.05, Paint()..color = tint.withOpacity(0.35));
-      canvas.drawCircle(o, r * 0.022, Paint()..color = tint);
-      canvas.restore();
     }
+    _origin(canvas, c, r, cl0, sl0, cp0, sp0, tint);
+    _link(canvas, c, r, cl0, sl0, cp0, sp0);
+    if (!lite) _orbit(canvas, c, r, tint, true);
+  }
+
+  // مدار مایل با ذراتی که جلوی کره از راست به چپ حرکت می‌کنند
+  void _orbit(Canvas canvas, Offset c, double r, Color tint, bool front) {
+    final fade = m.link > 0 ? 0.3 : 1.0;
+    canvas.save();
+    canvas.translate(c.dx, c.dy);
+    canvas.rotate(-0.38);
+    final rx = r * 1.3, ry = r * 0.4;
+    final oval = Rect.fromCenter(center: Offset.zero, width: rx * 2, height: ry * 2);
+    canvas.drawArc(
+      oval,
+      front ? 0.0 : pi,
+      pi,
+      false,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = front ? 1.1 : 0.7
+        ..color = tint.withOpacity((front ? 0.34 : 0.16) * fade),
+    );
+    const n = 12;
+    for (var i = 0; i < n; i++) {
+      final base = m.t * 1.0 + i * 2 * pi / n;
+      for (var k = 0; k < 5; k++) {
+        final a = base - k * 0.085;
+        final sa = sin(a);
+        if ((sa > 0) != front) continue;
+        final o = Offset(cos(a) * rx, sa * ry);
+        final al = (1 - k / 5) * (front ? 0.95 : 0.4) * fade;
+        final col = Color.lerp(tint, Colors.white, 0.6)!.withOpacity(al);
+        canvas.drawCircle(o, r * (0.022 - k * 0.0028), Paint()..color = col);
+        if (k == 0 && front) canvas.drawCircle(o, r * 0.05, Paint()..color = tint.withOpacity(0.22 * fade));
+      }
+    }
+    canvas.restore();
   }
 
   void _graticule(Canvas canvas, Offset c, double r, double cl0, double sl0, double cp0, double sp0, Color tint) {
@@ -861,57 +932,55 @@ class _GlobePainter extends CustomPainter {
       path,
       Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 0.7
-        ..color = tint.withOpacity(0.20),
+        ..strokeWidth = 0.6
+        ..color = tint.withOpacity(0.17),
     );
   }
 
+  // خشکی به‌شکل نقطه؛ نقطه‌ها بر اساس زاویه‌ی دید و نور در ۴ درجه‌ی روشنایی دسته‌بندی می‌شوند.
   void _dots(Canvas canvas, Offset c, double r, GeoAtlas at, double cl0, double sl0, double cp0, double sp0, Color tint) {
     final n = at.dotA.length;
-    if (_bufFor != at || _buf == null) {
-      _buf = Float32List(n * 4);
-      _bufFor = at;
+    if (_binsFor != at) {
+      for (var k = 0; k < 4; k++) {
+        _bins[k] = Float32List(n * 2);
+      }
+      _binsFor = at;
     }
-    final buf = _buf!;
-    var nf = 0, nb = 0;
+    final cnt = <int>[0, 0, 0, 0];
     final step = lite ? 2 : 1;
     for (var i = 0; i < n; i += step) {
       final a = at.dotA[i], b = at.dotB[i], s = at.dotS[i];
       final t1 = b * cl0 + a * sl0;
       final z = sp0 * s + cp0 * t1;
-      if (z <= 0.02) continue;
+      if (z <= 0.03) continue;
       final x = a * cl0 - b * sl0;
       final y = cp0 * s - sp0 * t1;
-      final px = c.dx + r * x, py = c.dy - r * y;
-      if (z > 0.38) {
-        buf[nf * 2] = px;
-        buf[nf * 2 + 1] = py;
-        nf++;
-      } else {
-        buf[n * 2 + nb * 2] = px;
-        buf[n * 2 + nb * 2 + 1] = py;
-        nb++;
-      }
+      final lit = x * -0.45 + y * 0.5 + z * 0.74;
+      final k = 0.5 * z + 0.5 * (0.5 + 0.5 * lit);
+      final bi = k < 0.40 ? 0 : (k < 0.58 ? 1 : (k < 0.76 ? 2 : 3));
+      final buf = _bins[bi]!;
+      final j = cnt[bi] * 2;
+      buf[j] = c.dx + r * x;
+      buf[j + 1] = c.dy - r * y;
+      cnt[bi]++;
     }
-    final width = max(1.6, r * 0.017);
-    if (nb > 0) {
+    final base = max(1.5, r * 0.0165);
+    final cols = <Color>[
+      tint.withOpacity(0.30),
+      Color.lerp(tint, Colors.white, 0.15)!.withOpacity(0.62),
+      Color.lerp(tint, Colors.white, 0.38)!.withOpacity(0.88),
+      Color.lerp(tint, Colors.white, 0.70)!.withOpacity(1.0),
+    ];
+    final widths = <double>[base * 0.7, base * 0.9, base * 1.05, base * 1.2];
+    for (var k = 0; k < 4; k++) {
+      if (cnt[k] == 0) continue;
       canvas.drawRawPoints(
         ui.PointMode.points,
-        Float32List.sublistView(buf, n * 2, n * 2 + nb * 2),
+        Float32List.sublistView(_bins[k]!, 0, cnt[k] * 2),
         Paint()
           ..strokeCap = StrokeCap.round
-          ..strokeWidth = width
-          ..color = tint.withOpacity(0.28),
-      );
-    }
-    if (nf > 0) {
-      canvas.drawRawPoints(
-        ui.PointMode.points,
-        Float32List.sublistView(buf, 0, nf * 2),
-        Paint()
-          ..strokeCap = StrokeCap.round
-          ..strokeWidth = width
-          ..color = tint.withOpacity(0.85),
+          ..strokeWidth = widths[k]
+          ..color = cols[k],
       );
     }
   }
@@ -945,8 +1014,8 @@ class _GlobePainter extends CustomPainter {
       path,
       Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 0.7
-        ..color = tint.withOpacity(0.30),
+        ..strokeWidth = 0.6
+        ..color = tint.withOpacity(0.22),
     );
   }
 
@@ -979,14 +1048,27 @@ class _GlobePainter extends CustomPainter {
       }
       path.close();
     }
-    canvas.drawPath(path, Paint()..color = _kGreen.withOpacity(0.38 * m.hl));
+    final acc = _flagAccent(m.flagCode);
+    if (m.flagCode.length == 2) {
+      // خاک کشور مقصد با رنگ‌های پرچمش پر می‌شود
+      final b = path.getBounds();
+      if (b.width > 0.5 && b.height > 0.5) {
+        canvas.saveLayer(b.inflate(4), Paint()..color = Colors.white.withOpacity(0.82 * m.hl));
+        canvas.clipPath(path);
+        canvas.translate(b.left, b.top);
+        FlagPainter(flagSpecFor(m.flagCode)).paint(canvas, b.size);
+        canvas.restore();
+      }
+    } else {
+      canvas.drawPath(path, Paint()..color = _kGreen.withOpacity(0.30 * m.hl));
+    }
     if (!lite) {
       canvas.drawPath(
         path,
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = 5
-          ..color = _kGreen.withOpacity(0.45 * m.hl)
+          ..color = acc.withOpacity(0.55 * m.hl)
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
       );
     }
@@ -994,11 +1076,11 @@ class _GlobePainter extends CustomPainter {
       path,
       Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.0
+        ..strokeWidth = 1.8
         ..strokeJoin = StrokeJoin.round
-        ..color = const Color(0xFFB6FFD6).withOpacity(m.hl),
+        ..color = Color.lerp(acc, Colors.white, 0.65)!.withOpacity(m.hl),
     );
-    // نقطه‌ی مرکز کشور با موج
+    // نقطه‌ی مقصد با موج
     final la = co.cLon * pi / 180, fa = co.cLat * pi / 180;
     final a = cos(fa) * sin(la), b = cos(fa) * cos(la), s = sin(fa);
     final t1 = b * cl0 + a * sl0;
@@ -1020,15 +1102,209 @@ class _GlobePainter extends CustomPainter {
     }
   }
 
+  // نقطه‌ی لوکیشن قبلی (مبدأ) با موج
+  void _origin(Canvas canvas, Offset c, double r, double cl0, double sl0, double cp0, double sp0, Color tint) {
+    if (!m.hasOrigin) return;
+    final a = cos(m.oLat) * sin(m.oLon), b = cos(m.oLat) * cos(m.oLon), s = sin(m.oLat);
+    final t1 = b * cl0 + a * sl0;
+    final z = sp0 * s + cp0 * t1;
+    if (z <= 0.02) return;
+    final o = Offset(c.dx + r * (a * cl0 - b * sl0), c.dy - r * (cp0 * s - sp0 * t1));
+    final vis = min(1.0, z * 3).toDouble();
+    if (!lite) {
+      for (var k = 0; k < 2; k++) {
+        final f = (m.pulse + k * 0.5) % 1.0;
+        canvas.drawCircle(
+          o,
+          r * (0.03 + 0.12 * f),
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.4
+            ..color = const Color(0xFF9CE3FF).withOpacity((1 - f) * 0.7 * vis),
+        );
+      }
+    }
+    canvas.drawCircle(o, r * 0.05, Paint()..color = const Color(0xFF9CE3FF).withOpacity(0.28 * vis));
+    canvas.drawCircle(o, r * 0.022, Paint()..color = Colors.white.withOpacity(vis));
+  }
+
+  // نوار سبز قوسی از لوکیشن قبلی تا لوکیشن جدید (روی دایره‌ی عظیمه، با ارتفاع)
+  void _link(Canvas canvas, Offset c, double r, double cl0, double sl0, double cp0, double sp0) {
+    if (!m.hasOrigin || m.link <= 0) return;
+    final oa = cos(m.oLat) * sin(m.oLon), ob = cos(m.oLat) * cos(m.oLon), os = sin(m.oLat);
+    final ta = cos(m.tLat) * sin(m.tLon), tb = cos(m.tLat) * cos(m.tLon), ts = sin(m.tLat);
+    final dot = (oa * ta + ob * tb + os * ts).clamp(-1.0, 1.0).toDouble();
+    final om = acos(dot);
+    if (om < 0.02) return;
+    final so = sin(om);
+    final lift = 0.10 + 0.24 * (om / pi);
+
+    Offset? at(double u) {
+      final f1 = sin((1 - u) * om) / so, f2 = sin(u * om) / so;
+      final a = oa * f1 + ta * f2, b = ob * f1 + tb * f2, s = os * f1 + ts * f2;
+      final rad = 1 + lift * sin(pi * u);
+      final t1 = b * cl0 + a * sl0;
+      final z = (sp0 * s + cp0 * t1) * rad;
+      final x = (a * cl0 - b * sl0) * rad;
+      final y = (cp0 * s - sp0 * t1) * rad;
+      if (z > 0 || x * x + y * y > 1.0) return Offset(c.dx + r * x, c.dy - r * y);
+      return null;
+    }
+
+    const segs = 80;
+    final path = Path();
+    var pen = false;
+    for (var k = 0; k <= segs; k++) {
+      final p = at(m.link * k / segs);
+      if (p == null) {
+        pen = false;
+        continue;
+      }
+      if (pen) {
+        path.lineTo(p.dx, p.dy);
+      } else {
+        path.moveTo(p.dx, p.dy);
+        pen = true;
+      }
+    }
+    final wMain = max(2.6, r * 0.02);
+    if (!lite) {
+      canvas.drawPath(
+        path,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeWidth = wMain * 3.4
+          ..color = _kGreen.withOpacity(0.30)
+          ..maskFilter = MaskFilter.blur(BlurStyle.normal, r * 0.03),
+      );
+    }
+    canvas.drawPath(
+      path,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..strokeWidth = wMain
+        ..color = _kGreen.withOpacity(0.92),
+    );
+    canvas.drawPath(
+      path,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..strokeWidth = max(1.1, wMain * 0.38)
+        ..color = const Color(0xFFD8FFE9).withOpacity(0.95),
+    );
+    // بسته‌های داده که روی نوار از مبدأ به مقصد می‌دوند
+    for (var j = 0; j < 5; j++) {
+      final u = ((m.stream + j / 5.0) % 1.0) * m.link;
+      final p = at(u);
+      if (p == null) continue;
+      canvas.drawCircle(p, wMain * 1.9, Paint()..color = _kGreen.withOpacity(0.28));
+      canvas.drawCircle(p, wMain * 0.85, Paint()..color = Colors.white.withOpacity(0.95));
+    }
+    // سر نوار
+    final hp = at(m.link);
+    if (hp != null) {
+      canvas.drawCircle(hp, wMain * 3.2, Paint()..color = _kGreen.withOpacity(0.30));
+      canvas.drawCircle(hp, wMain * 1.4, Paint()..color = const Color(0xFFD8FFE9));
+    }
+  }
+
   @override
   bool shouldRepaint(covariant _GlobePainter old) => old.lite != lite;
 }
 
 /// شکل تخت و برداری (مثل SVG) کشور: مرز اصلی کشور با درخشش.
+/// رنگ شاخص پرچم (اولین نوار غیرسفید/غیرسیاه) برای درخشش و مرز.
+Color _flagAccent(String code) {
+  if (code.length != 2) return _kGreen;
+  for (final b in flagSpecFor(code).bands) {
+    if (b != 0xFFFFFFFF && b != 0xFF000000) return Color(b);
+  }
+  return _kGreen;
+}
+
+/// نماد ملی/دیدنی هر کشور (آیکن). اگر کشوری در جدول نباشد، خود نماد پرچم نشان داده می‌شود.
+const Map<String, IconData> _kSymbols = {
+  'DE': Icons.account_balance_rounded, // دروازه‌ی براندنبورگ
+  'FR': Icons.cell_tower_rounded, // برج ایفل
+  'GB': Icons.schedule_rounded, // بیگ‌بن
+  'US': Icons.stars_rounded,
+  'NL': Icons.wind_power_rounded, // آسیاب بادی
+  'JP': Icons.terrain_rounded, // کوه فوجی
+  'RU': Icons.church_rounded, // کلیسای سنت باسیل
+  'TR': Icons.mosque_rounded,
+  'IR': Icons.mosque_rounded,
+  'SA': Icons.mosque_rounded,
+  'AE': Icons.apartment_rounded, // برج خلیفه
+  'CN': Icons.temple_buddhist_rounded,
+  'KR': Icons.temple_buddhist_rounded,
+  'IN': Icons.temple_hindu_rounded,
+  'EG': Icons.change_history_rounded, // اهرام
+  'CA': Icons.eco_rounded, // برگ افرا
+  'IT': Icons.stadium_rounded, // کولوسئوم
+  'CH': Icons.landscape_rounded, // آلپ
+  'AU': Icons.surfing_rounded,
+  'BR': Icons.sports_soccer_rounded,
+  'SE': Icons.ac_unit_rounded,
+  'NO': Icons.ac_unit_rounded,
+  'FI': Icons.ac_unit_rounded,
+  'DK': Icons.ac_unit_rounded,
+  'IS': Icons.ac_unit_rounded,
+  'UA': Icons.grass_rounded, // گندم
+  'SG': Icons.location_city_rounded,
+};
+
+/// کارت کشور متصل: خاک کشور با رنگ‌های پرچم + نشان نماد ملی (یا خود پرچم).
+class CountryFlagCard extends StatelessWidget {
+  final GeoCountry country;
+  final String code;
+  final double size;
+  const CountryFlagCard({super.key, required this.country, required this.code, this.size = 112});
+
+  @override
+  Widget build(BuildContext context) {
+    final acc = _flagAccent(code);
+    final icon = _kSymbols[code.toUpperCase()];
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(clipBehavior: Clip.none, children: [
+        Positioned.fill(child: CustomPaint(painter: CountryShapePainter(country, acc, flagCode: code))),
+        Positioned(
+          right: -6,
+          bottom: -4,
+          child: Container(
+            width: 40,
+            height: 40,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: const Color(0xFF0A1530),
+              border: Border.all(color: acc, width: 2),
+              boxShadow: [BoxShadow(color: acc.withOpacity(0.6), blurRadius: 10)],
+            ),
+            child: icon != null
+                ? Icon(icon, color: Colors.white, size: 22)
+                : ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: SizedBox(width: 26, height: 18, child: CustomPaint(painter: FlagPainter(flagSpecFor(code)))),
+                  ),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
 class CountryShapePainter extends CustomPainter {
   final GeoCountry country;
   final Color color;
-  CountryShapePainter(this.country, this.color);
+  final String flagCode;
+  CountryShapePainter(this.country, this.color, {this.flagCode = ''});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1064,7 +1340,23 @@ class CountryShapePainter extends CustomPainter {
       }
       path.close();
     }
-    canvas.drawPath(path, Paint()..color = color.withOpacity(0.22));
+    if (flagCode.length == 2) {
+      // خاک کشور با رنگ‌های پرچم پر می‌شود + درخشش ملایم برای حس عمق
+      final b = path.getBounds();
+      canvas.save();
+      canvas.clipPath(path);
+      canvas.translate(b.left, b.top);
+      FlagPainter(flagSpecFor(flagCode)).paint(canvas, b.size);
+      canvas.translate(-b.left, -b.top);
+      canvas.drawRect(
+        b,
+        Paint()
+          ..shader = ui.Gradient.linear(b.topLeft, b.bottomRight, [Colors.white.withOpacity(0.28), Colors.transparent, Colors.black.withOpacity(0.25)], [0, 0.5, 1]),
+      );
+      canvas.restore();
+    } else {
+      canvas.drawPath(path, Paint()..color = color.withOpacity(0.22));
+    }
     canvas.drawPath(
       path,
       Paint()
@@ -1084,5 +1376,5 @@ class CountryShapePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant CountryShapePainter old) => old.country != country || old.color != color;
+  bool shouldRepaint(covariant CountryShapePainter old) => old.country != country || old.color != color || old.flagCode != flagCode;
 }

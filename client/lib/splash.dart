@@ -4,8 +4,10 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import 'name_page.dart';
 import 'nexora_logo.dart';
 import 'pages.dart';
+import 'store.dart';
 
 /// صفحه‌ی ورودی: اول لودینگ (حداکثر ۷ ثانیه) و بعد صفحه‌ی اصلی.
 class SplashGate extends StatefulWidget {
@@ -17,12 +19,17 @@ class SplashGate extends StatefulWidget {
 
 class _SplashGateState extends State<SplashGate> {
   bool _done = false;
+  late bool _named = Store.userName.value.isNotEmpty;
 
   @override
   Widget build(BuildContext context) => AnimatedSwitcher(
         duration: const Duration(milliseconds: 450),
         child: _done
-            ? const Shell(key: ValueKey('shell'))
+            ? (_named
+                ? const Shell(key: ValueKey('shell'))
+                : NamePage(key: const ValueKey('name'), onDone: () {
+                    if (mounted) setState(() => _named = true);
+                  }))
             : SplashPage(key: const ValueKey('splash'), onDone: () {
                 if (mounted && !_done) setState(() => _done = true);
               }),

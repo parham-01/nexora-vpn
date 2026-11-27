@@ -3,14 +3,6 @@ name: build
 on:
   workflow_dispatch:
     inputs:
-      sb_url:
-        description: Supabase Project URL
-        required: true
-        default: 'https://YOUR-PROJECT.supabase.co'
-      sb_key:
-        description: Supabase anon/publishable key
-        required: false
-        default: ''
       android:
         description: Build Android APK
         type: boolean
@@ -48,8 +40,6 @@ jobs:
     permissions:
       contents: write
     env:
-      SB_URL: ${{ inputs.sb_url }}
-      SB_KEY: ${{ inputs.sb_key }}
       TUNNEL_DOMAIN: ${{ vars.TUNNEL_DOMAIN }}
       TUNNEL_PUBKEY: ${{ vars.TUNNEL_PUBKEY }}
     steps:
@@ -126,7 +116,7 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('client/pubspec.yaml', 'admin/pubspec.yaml', 'tools/patch_android.py') }}
+          key: gradle-${{ runner.os }}-${{ hashFiles('client/pubspec.yaml', 'tools/patch_android.py') }}
           restore-keys: gradle-${{ runner.os }}-
       - name: Signing key (Google Play upload key)
         shell: bash
@@ -138,35 +128,51 @@ jobs:
           set -euo pipefail
           mkdir -p keystore
           if [ -n "${SECRET_KS:-}" ] && [ -n "${SECRET_PASS:-}" ]; then
-            echo "$SECRET_KS" | base64 -d > keystore/upload.jks
+            echo "$SECRET_KS" | base64 -d > keystore/parham-upload.jks
             echo "KS_PASS=$SECRET_PASS" >> "$GITHUB_ENV"
-            echo "KS_ALIAS=${SECRET_ALIAS:-nexora}" >> "$GITHUB_ENV"
+            echo "KS_ALIAS=${SECRET_ALIAS:-parham}" >> "$GITHUB_ENV"
             echo "Using keystore from repository secrets"
+          elif [ -f keystore/parham-upload.jks ] && [ -f keystore/key.txt ]; then
+            echo "KS_PASS=$(grep '^password=' keystore/key.txt | cut -d= -f2-)" >> "$GITHUB_ENV"
+            echo "KS_ALIAS=$(grep '^alias=' keystore/key.txt | cut -d= -f2-)" >> "$GITHUB_ENV"
+            echo "Using keystore stored in the (private) repository"
           else
             PASS="$(openssl rand -hex 16)"
-            keytool -genkeypair -keystore keystore/upload.jks -storetype JKS \
-              -alias nexora -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass "$PASS" -keypass "$PASS" -dname "CN=Nexora VPN"
+            keytool -genkeypair -v -keystore keystore/parham-upload.jks -storetype JKS \
+              -alias parham -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$PASS" -keypass "$PASS" \
+              -dname "CN=Parham VPN, OU=Parham, O=Parham, L=Tehran, ST=Tehran, C=IR"
+            printf 'alias=parham\npassword=%s\n' "$PASS" > keystore/key.txt
             echo "KS_PASS=$PASS" >> "$GITHUB_ENV"
-            echo "KS_ALIAS=nexora" >> "$GITHUB_ENV"
-            echo "::warning::No signing secrets set. Using a temporary key: updates over an older install will not work. Set ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_ALIAS."
+            echo "KS_ALIAS=parham" >> "$GITHUB_ENV"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add keystore/parham-upload.jks keystore/key.txt
+            git commit -m "add upload keystore" || true
+            if git push; then
+              echo "New keystore created and saved in the repository (keystore/)"
+            else
+              echo "::warning::Could not save keystore to repository. Download the keystore-backup artifact and keep it safe!"
+            fi
           fi
-          keytool -list -v -keystore keystore/upload.jks -storepass "$(grep -h '^KS_PASS=' "$GITHUB_ENV" | tail -1 | cut -d= -f2-)" | grep -E "Alias name|SHA1|SHA256" || true
+          keytool -list -v -keystore keystore/parham-upload.jks -storepass "$(grep -h '^KS_PASS=' "$GITHUB_ENV" | tail -1 | cut -d= -f2-)" | grep -E "Alias name|SHA1|SHA256" || true
       - name: Build
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p out
-          export KEYSTORE_PATH="$PWD/keystore/upload.jks"
+          export KEYSTORE_PATH="$PWD/keystore/parham-upload.jks"
           export KEYSTORE_PASSWORD="$KS_PASS"
           export KEY_PASSWORD="$KS_PASS"
           export KEY_ALIAS="$KS_ALIAS"
           BN="${{ github.run_number }}"
-          DEFS="--dart-define=SB_URL=$SB_URL --dart-define=SB_KEY=$SB_KEY --dart-define=TUNNEL_DOMAIN=${TUNNEL_DOMAIN:-} --dart-define=TUNNEL_PUBKEY=${TUNNEL_PUBKEY:-} --dart-define=UPDATE_REPO=${{ github.repository }}"
+          DEFS="--dart-define=TUNNEL_DOMAIN=${TUNNEL_DOMAIN:-} --dart-define=TUNNEL_PUBKEY=${TUNNEL_PUBKEY:-} --dart-define=UPDATE_REPO=parham-01/nexora-vpn"
           stopg() { pkill -f 'GradleDaemon|KotlinCompileDaemon' || true; sleep 2; free -h || true; }
           pip install pillow --quiet || pip install --break-system-packages pillow --quiet
           bash tools/scaffold.sh client android
           python3 tools/patch_android.py client "NEXORA VPN"
+          GITHUB_TOKEN="${{ github.token }}" python3 tools/get_singbox.py android client/android/app/src/main/jniLibs
+          for abi in arm64-v8a armeabi-v7a x86_64; do test -s "client/android/app/src/main/jniLibs/$abi/libsingbox.so" || { echo "::error::libsingbox.so missing for $abi"; exit 1; }; done
           python3 tools/prepare_firefox_android.py client
           python3 tools/prepare_updater_android.py client
           mkdir -p client/android/app/libs
@@ -203,11 +209,7 @@ jobs:
           python3 tools/apply_icon.py client android
           bash tools/add_font.sh client
           bash tools/add_pixel_font.sh client
-          bash tools/scaffold.sh admin android
-          python3 tools/patch_android.py admin "NEXORA Admin"
-          bash tools/add_font.sh admin
           (cd client && flutter pub get)
-          (cd admin && flutter pub get)
           (cd client && flutter build apk --release --build-name="1.0.$BN" --build-number="$BN" --target-platform "android-arm,android-arm64,android-x64" $DEFS)
           cp client/build/app/outputs/flutter-apk/app-release.apk "out/NEXORA-VPN-Android-universal.apk"
           stopg
@@ -216,11 +218,6 @@ jobs:
           cp client/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk "out/NEXORA-VPN-Android-armeabi-v7a.apk"
           cp client/build/app/outputs/flutter-apk/app-x86_64-release.apk "out/NEXORA-VPN-Android-x86_64.apk"
           rm -rf client/build client/android/.gradle client/android/app/.cxx
-          stopg
-          df -h /
-          (cd admin && flutter build apk --release --build-number="$BN" --target-platform "android-arm,android-arm64,android-x64" $DEFS)
-          cp admin/build/app/outputs/flutter-apk/app-release.apk "out/NEXORA-Admin-Android-universal.apk"
-          rm -rf admin/build admin/android/.gradle admin/android/app/.cxx
           stopg
           df -h /
           if [ "${{ inputs.aab }}" = "true" ]; then
@@ -236,6 +233,13 @@ jobs:
             out/*.aab
           retention-days: 1
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: keystore-backup
+          path: keystore/*
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Publish GitHub Release (in-app updater)
         continue-on-error: true
         shell: bash
@@ -254,8 +258,6 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     env:
-      SB_URL: ${{ inputs.sb_url }}
-      SB_KEY: ${{ inputs.sb_key }}
     steps:
       - uses: actions/checkout@v5
       - name: Unpack project bundle (if the repo was pushed as one bundle)
@@ -336,13 +338,14 @@ jobs:
           sed -i 's/Parham VPN/NEXORA VPN/g; s/parham_client/NEXORA VPN/g' client/windows/runner/Runner.rc || true
           cp client/lib/vpn_android_stub.dart client/lib/vpn_android.dart
           sed -i '/flutter_v2ray/d' client/pubspec.yaml
-          (cd client && flutter pub get && flutter build windows --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}" --dart-define=APP_VERSION="1.0.${{ github.run_number }}" --dart-define=SB_URL="$SB_URL" --dart-define=SB_KEY="$SB_KEY" --dart-define=UPDATE_REPO="${{ github.repository }}")
+          (cd client && flutter pub get && flutter build windows --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}" --dart-define=APP_VERSION="1.0.${{ github.run_number }}" --dart-define=UPDATE_REPO="parham-01/nexora-vpn")
           mkdir -p client/build/windows/x64/runner/Release/firefox-core
           cp firefox-core-build/*.exe client/build/windows/x64/runner/Release/firefox-core/
           mkdir -p stage/NEXORA-VPN-Windows
           cp -r client/build/windows/x64/runner/Release/. stage/NEXORA-VPN-Windows/
           mkdir -p stage/NEXORA-VPN-Windows/xray
           cp -r xray/. stage/NEXORA-VPN-Windows/xray/
+          GITHUB_TOKEN="${{ github.token }}" python3 tools/get_singbox.py windows-amd64 stage/NEXORA-VPN-Windows/singbox
       - name: Package Windows (installer and portable zip)
         shell: pwsh
         run: |
@@ -379,8 +382,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      SB_URL: ${{ inputs.sb_url }}
-      SB_KEY: ${{ inputs.sb_key }}
     steps:
       - uses: actions/checkout@v5
       - name: Unpack project bundle (if the repo was pushed as one bundle)
@@ -443,11 +444,12 @@ jobs:
           sed -i 's/"parham_client"/"NEXORA VPN"/g' client/linux/runner/my_application.cc || true
           cp client/lib/vpn_android_stub.dart client/lib/vpn_android.dart
           sed -i '/flutter_v2ray/d' client/pubspec.yaml
-          (cd client && flutter pub get && flutter build linux --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}" --dart-define=APP_VERSION="1.0.${{ github.run_number }}" --dart-define=SB_URL="$SB_URL" --dart-define=SB_KEY="$SB_KEY" --dart-define=UPDATE_REPO="${{ github.repository }}")
+          (cd client && flutter pub get && flutter build linux --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}" --dart-define=APP_VERSION="1.0.${{ github.run_number }}" --dart-define=UPDATE_REPO="parham-01/nexora-vpn")
           B=client/build/linux/x64/release/bundle
           mkdir -p "$B/firefox-core" "$B/xray"
           cp firefox-core-build/nexora-vpn-core "$B/firefox-core/" && chmod +x "$B/firefox-core/nexora-vpn-core"
           cp -r xray/. "$B/xray/"
+          GITHUB_TOKEN="${{ github.token }}" python3 tools/get_singbox.py linux-amd64 "$B/singbox"
           cp tools/nexora_icon.png "$B/nexora_icon.png"
           mkdir -p out/NexoraVPN-Linux
           cp -r "$B"/. out/NexoraVPN-Linux/
@@ -476,8 +478,6 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     env:
-      SB_URL: ${{ inputs.sb_url }}
-      SB_KEY: ${{ inputs.sb_key }}
     steps:
       - uses: actions/checkout@v5
       - name: Unpack project bundle (if the repo was pushed as one bundle)
@@ -541,11 +541,12 @@ jobs:
           sed -i 's/"parham_client"/"NEXORA VPN"/g' client/linux/runner/my_application.cc || true
           cp client/lib/vpn_android_stub.dart client/lib/vpn_android.dart
           sed -i '/flutter_v2ray/d' client/pubspec.yaml
-          (cd client && flutter pub get && flutter build linux --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}" --dart-define=APP_VERSION="1.0.${{ github.run_number }}" --dart-define=SB_URL="$SB_URL" --dart-define=SB_KEY="$SB_KEY" --dart-define=UPDATE_REPO="${{ github.repository }}")
+          (cd client && flutter pub get && flutter build linux --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}" --dart-define=APP_VERSION="1.0.${{ github.run_number }}" --dart-define=UPDATE_REPO="parham-01/nexora-vpn")
           B=client/build/linux/arm64/release/bundle
           mkdir -p "$B/firefox-core" "$B/xray"
           cp firefox-core-build/nexora-vpn-core "$B/firefox-core/" && chmod +x "$B/firefox-core/nexora-vpn-core"
           cp -r xray/. "$B/xray/"
+          GITHUB_TOKEN="${{ github.token }}" python3 tools/get_singbox.py linux-arm64 "$B/singbox"
           cp tools/nexora_icon.png "$B/nexora_icon.png"
           mkdir -p out/NexoraVPN-Linux
           cp -r "$B"/. out/NexoraVPN-Linux/
@@ -574,8 +575,6 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 45
     env:
-      SB_URL: ${{ inputs.sb_url }}
-      SB_KEY: ${{ inputs.sb_key }}
     steps:
       - uses: actions/checkout@v5
       - name: Unpack project bundle (if the repo was pushed as one bundle)
@@ -636,6 +635,11 @@ jobs:
           lipo -create xa/xray xi/xray -output xray/xray
           cp xa/*.dat xray/ 2>/dev/null || true
           chmod +x xray/xray
+          GITHUB_TOKEN="${{ github.token }}" python3 tools/get_singbox.py darwin-arm64 sb-arm
+          GITHUB_TOKEN="${{ github.token }}" python3 tools/get_singbox.py darwin-amd64 sb-amd
+          mkdir -p singbox
+          lipo -create sb-arm/sing-box sb-amd/sing-box -output singbox/sing-box
+          chmod +x singbox/sing-box
           pip3 install pillow --quiet || pip3 install --break-system-packages pillow --quiet
           bash tools/scaffold.sh client macos
           python3 tools/apply_icon.py client macos
@@ -649,11 +653,12 @@ jobs:
           done
           cp client/lib/vpn_android_stub.dart client/lib/vpn_android.dart
           sed -i '' '/flutter_v2ray/d' client/pubspec.yaml
-          (cd client && flutter pub get && flutter build macos --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}" --dart-define=APP_VERSION="1.0.${{ github.run_number }}" --dart-define=SB_URL="$SB_URL" --dart-define=SB_KEY="$SB_KEY" --dart-define=UPDATE_REPO="${{ github.repository }}")
+          (cd client && flutter pub get && flutter build macos --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}" --dart-define=APP_VERSION="1.0.${{ github.run_number }}" --dart-define=UPDATE_REPO="parham-01/nexora-vpn")
           APP="$(ls -d client/build/macos/Build/Products/Release/*.app | head -1)"
-          mkdir -p "$APP/Contents/MacOS/firefox-core" "$APP/Contents/MacOS/xray"
+          mkdir -p "$APP/Contents/MacOS/firefox-core" "$APP/Contents/MacOS/xray" "$APP/Contents/MacOS/singbox"
           cp firefox-core-build/nexora-vpn-core "$APP/Contents/MacOS/firefox-core/"
           cp -r xray/. "$APP/Contents/MacOS/xray/"
+          cp singbox/sing-box "$APP/Contents/MacOS/singbox/" && chmod +x "$APP/Contents/MacOS/singbox/sing-box"
           codesign --force --deep -s - "$APP"
           rm -rf dmgstage && mkdir dmgstage
           cp -R "$APP" dmgstage/

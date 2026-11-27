@@ -8,6 +8,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 // ویندوز، مک و لینوکس دقیقاً مثل اندروید در «حالت سبک» اجرا می‌شوند (کرش و کندی نداشته باشند).
 final bool kFancy = false;
 
+/// نسخه‌ی نمایشی برنامه (باید با pubspec یکی باشد)؛ در پروفایل و پنل ادمین دیده می‌شود
+const String kAppVersion = '1.0.2';
+
 class P {
   final Color bg, card, border, text, sub, accent, accent2;
   const P(this.bg, this.card, this.border, this.text, this.sub, this.accent, this.accent2);
@@ -50,8 +53,67 @@ class Store {
   static bool get introSeen => _p.getBool('introSeen') ?? false;
   static Future<void> setIntroSeen() => _p.setBool('introSeen', true);
 
+  /// نام کاربر (قبل از ورود به برنامه انتخاب می‌شود و در پروفایل/تنظیمات نمایش داده می‌شود)
+  static final ValueNotifier<String> userName = ValueNotifier('');
+  static Future<void> setUserName(String v) async {
+    final t = v.trim();
+    await _p.setString('userName', t);
+    userName.value = t;
+    onChanged?.call();
+  }
+
+  /// بعد از هر تغییر تنظیمات صدا زده می‌شود (بکاپ خودکارِ گاوصندوق از آن استفاده می‌کند)
+  static void Function()? onChanged;
+
+  static int getInt(String k, int d) => _p.getInt(k) ?? d;
+  static Future<void> setInt(String k, int v) async {
+    await _p.setInt(k, v);
+    onChanged?.call();
+  }
+
+  // ---- گزینه‌های پروفایل و تنظیمات پیشرفته ----
+  /// نام کاربر برای ادمین فرستاده شود؟ (پیش‌فرض بله)
+  static bool get confirmDisconnect => _p.getBool('confirm_disconnect') ?? false;
+  /// قطع خودکار اتصال بعد از N ساعت (0 = خاموش)
+  static int get autoOffHours => _p.getInt('auto_off_h') ?? 0;
+  /// هشدار مصرف هر نشست بر حسب مگابایت (0 = خاموش)
+  static int get usageAlertMb => _p.getInt('usage_alert_mb') ?? 0;
+
+  // ---- آمار مصرف روی همین دستگاه (برای صفحه‌ی پروفایل) ----
+  static int get installAt => _p.getInt('install_at') ?? 0;
+  static int get statUp => _p.getInt('st_up') ?? 0;
+  static int get statDown => _p.getInt('st_down') ?? 0;
+  static int get statSeconds => _p.getInt('st_secs') ?? 0;
+  static int get statSessions => _p.getInt('st_sessions') ?? 0;
+  static int get statMaxSession => _p.getInt('st_max') ?? 0;
+
+  static Future<void> addUsage(int up, int down, int secs) async {
+    if (up <= 0 && down <= 0 && secs <= 0) return;
+    await _p.setInt('st_up', statUp + (up < 0 ? 0 : up));
+    await _p.setInt('st_down', statDown + (down < 0 ? 0 : down));
+    await _p.setInt('st_secs', statSeconds + (secs < 0 ? 0 : secs));
+    await _p.setInt('st_sessions', statSessions + 1);
+    if (up + down > statMaxSession) await _p.setInt('st_max', up + down);
+  }
+
+  static Future<void> clearUsageStats() async {
+    for (final k in ['st_up', 'st_down', 'st_secs', 'st_sessions', 'st_max']) {
+      await _p.remove(k);
+    }
+  }
+
   static Future<void> init() async {
     _p = await SharedPreferences.getInstance();
+    userName.value = (_p.getString('userName') ?? '').trim();
+    if (_p.getInt('install_at') == null) await _p.setInt('install_at', DateTime.now().millisecondsSinceEpoch);
+    if (_p.getBool('monthly_reset') ?? false) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final last = _p.getInt('st_reset_at') ?? _p.getInt('install_at') ?? now;
+      if (now - last >= 30 * 86400000) {
+        await clearUsageStats();
+        await _p.setInt('st_reset_at', now);
+      }
+    }
     firstRun = !(_p.getBool('introSeen') ?? false);
     // کلید جدید lite3: مقدار قدیمی (lite2) نادیده گرفته می‌شود تا همه‌ی دستگاه‌ها یک‌بار با «روشن» شروع کنند
     lite.value = _p.getBool('lite3') ?? true;
@@ -229,10 +291,16 @@ class Store {
   }
 
   static String getStr(String k) => _p.getString(k) ?? '';
-  static Future<void> setStr(String k, String v) => _p.setString(k, v);
+  static Future<void> setStr(String k, String v) async {
+    await _p.setString(k, v);
+    onChanged?.call();
+  }
 
   static bool getBool(String k, bool d) => _p.getBool(k) ?? d;
-  static Future<void> setBool(String k, bool v) => _p.setBool(k, v);
+  static Future<void> setBool(String k, bool v) async {
+    await _p.setBool(k, v);
+    onChanged?.call();
+  }
 
   static String get serverId => _p.getString('serverId') ?? '';
   static Future<void> setServerId(String v) => _p.setString('serverId', v);
@@ -273,7 +341,7 @@ class Store {
   static Future<void> setAutoTimezoneSync(bool v) => _p.setBool('auto_timezone_sync', v);
 
   static Future<void> resetSettings() async {
-    for (final k in ['autoConnect', 'notif', 'battery', 'system', 'advNotif', 'serverId', 'theme', 'lite2', 'lite3', 'stealth_fragment', 'upstream_proxy', 'upstream_proxy_on', 'auto_timezone_sync']) {
+    for (final k in ['autoConnect', 'notif', 'battery', 'system', 'advNotif', 'serverId', 'theme', 'lite2', 'lite3', 'stealth_fragment', 'upstream_proxy', 'upstream_proxy_on', 'auto_timezone_sync', 'confirm_disconnect', 'auto_off_h', 'usage_alert_mb', 'haptic', 'show_traffic', 'remind_h', 'total_cap_gb', 'monthly_reset', 'st_reset_at', 'dns_choice', 'block_quic', 'block_torrent', 'block_stun', 'mux_on']) {
       await _p.remove(k);
     }
     themeMode.value = ThemeMode.dark;

@@ -1,11 +1,14 @@
 import 'dart:convert';
+import 'singbox_config.dart';
+import 'store.dart';
 
 class LinkInfo {
   final String protocol;
   final String transport;
   final Map<String, dynamic>? outbound;
   final String name;
-  LinkInfo(this.protocol, this.transport, this.outbound, {this.name = ''});
+  final String engine;
+  LinkInfo(this.protocol, this.transport, this.outbound, {this.name = '', this.engine = 'xray'});
 }
 
 String _dec(String s) {
@@ -36,13 +39,7 @@ Map<String, dynamic> _stream(Map<String, String> q, String host) {
   if (net == 'splithttp') net = 'xhttp';
   final sec = (q['security'] ?? 'none').toLowerCase();
   final hostHdr = q['host'] ?? '';
-  final s = <String, dynamic>{
-    'network': net,
-    'security': sec,
-    'sockopt': {
-      'tcpKeepAliveInterval': 15,
-    },
-  };
+  final s = <String, dynamic>{'network': net, 'security': sec};
 
   if (sec == 'tls') {
     final alpn = q['alpn'] ?? '';
@@ -59,41 +56,12 @@ Map<String, dynamic> _stream(Map<String, String> q, String host) {
       'fingerprint': _first(q['fp'], 'chrome'),
       'publicKey': q['pbk'] ?? '',
       'shortId': q['sid'] ?? '',
-      // کلید JSON هسته‌ی Xray باید همین باشد؛ در سورس به‌صورت تکه‌تکه ساخته می‌شود.
       _realityPathKey: _first(q['nex'], q[_legacyPathKey]),
       if ((q['pqv'] ?? '').isNotEmpty) 'mldsa65Verify': q['pqv'],
-      if ((q['spx'] ?? '').isNotEmpty) 'spiderX': q['spx'],
     };
   }
 
-  if (net == 'h2') {
-    net = 'http';
-    s['network'] = 'http';
-  }
-
   switch (net) {
-    case 'tcp':
-      if ((q['headerType'] ?? '') == 'http') {
-        final hp = _first(q['path'], '/');
-        s['tcpSettings'] = {
-          'header': {
-            'type': 'http',
-            'request': {
-              'version': '1.1',
-              'method': 'GET',
-              'path': hp.split(','),
-              if (hostHdr.isNotEmpty) 'headers': {'Host': hostHdr.split(',')},
-            },
-          },
-        };
-      }
-      break;
-    case 'http':
-      s['httpSettings'] = {
-        'path': _first(q['path'], '/'),
-        if (hostHdr.isNotEmpty) 'host': hostHdr.split(','),
-      };
-      break;
     case 'ws':
       s['wsSettings'] = {
         'path': _first(q['path'], '/'),
@@ -163,6 +131,12 @@ LinkInfo parseLink(String link) {
   final hashAt = l.indexOf('#');
   final frag = hashAt < 0 ? '' : _dec(l.substring(hashAt + 1));
   final noFrag = hashAt < 0 ? l : l.substring(0, hashAt);
+  final eng = singboxEngineOf(scheme);
+  if (eng != 'xray') {
+    final sb = parseSingboxLink(l);
+    if (sb != null) return LinkInfo(sb.protocol, sb.transport, sb.body, name: sb.name, engine: sb.protocol == 'amneziawg' ? 'amneziawg' : 'singbox');
+    return LinkInfo(scheme, '', null);
+  }
   try {
     if (scheme == 'vmess') {
       final m = jsonDecode(_b64(noFrag.substring(idx + 3))) as Map<String, dynamic>;
@@ -320,8 +294,7 @@ Map<String, dynamic> mobileBaseConfig() {
         'settings': proto == 'socks' ? {'auth': 'noauth', 'udp': true, 'userLevel': 8} : {'userLevel': 8},
         'sniffing': {
           'enabled': true,
-          'destOverride': ['http', 'tls', 'quic'],
-          'routeOnly': false,
+          'destOverride': ['http', 'tls']
         },
       };
   return {
@@ -329,118 +302,34 @@ Map<String, dynamic> mobileBaseConfig() {
     'stats': {},
     'policy': {
       'levels': {
-        '8': {
-          'connIdle': 300,
-          'uplinkOnly': 2,
-          'downlinkOnly': 2,
-          'statsUserUplink': false,
-          'statsUserDownlink': false,
-          'bufferSize': 512,
-        }
+        '8': {'connIdle': 300, 'uplinkOnly': 1, 'downlinkOnly': 1, 'statsUserUplink': false, 'statsUserDownlink': false, 'bufferSize': 10}
       },
       'system': {'statsOutboundUplink': true, 'statsOutboundDownlink': true}
     },
-    'dns': dnsBlock(const []),
+    'dns': {
+      'servers': ['1.1.1.1', '8.8.8.8']
+    },
     'inbounds': [inbound('socks', 10808, 'socks'), inbound('http', 10809, 'http')],
     'outbounds': [
-      {
-        'tag': 'fragment',
-        'protocol': 'freedom',
-        'settings': {
-          'domainStrategy': 'AsIs',
-          'fragment': {
-            'packets': '1-3',
-            'length': '100-200',
-            'interval': '10-20',
-          }
-        }
-      },
       {'tag': 'direct', 'protocol': 'freedom', 'settings': {}},
       {'tag': 'block', 'protocol': 'blackhole', 'settings': {}},
     ],
-    'routing': {
-      'domainStrategy': 'IPIfNonMatch',
-      'rules': [
-        // سپر محافظتی WebRTC: مسدودسازی پورت‌ها و دامنه‌های STUN/TURN برای جلوگیری از نشت آی‌پی ایران
-        {
-          'type': 'field',
-          'port': '3478,5349',
-          'outboundTag': 'block',
-        },
-        {
-          'type': 'field',
-          'domain': [
-            'domain:stun.',
-            'domain:turn.',
-            'stun.l.google.com',
-            'stun.cloudflare.com',
-            'stun.services.mozilla.com',
-            'stun.stunprotocol.org',
-          ],
-          'outboundTag': 'block',
-        },
-        {
-          'type': 'field',
-          'domain': [
-            'domain:google.com',
-            'domain:googleapis.com',
-            'domain:gstatic.com',
-            'domain:gemini.google.com',
-            'domain:generativelanguage.googleapis.com',
-            'domain:deepmind.google',
-            'domain:aistudio.google.com',
-            'domain:anthropic.com',
-            'domain:claude.ai',
-            'domain:openai.com',
-            'domain:chatgpt.com',
-            'domain:amazon.com',
-            'domain:amazonaws.com',
-            'domain:aws.amazon.com',
-            'domain:cloudflare.com',
-          ],
-          'outboundTag': 'proxy',
-        }
-      ]
-    },
+    'routing': {'domainStrategy': 'IPIfNonMatch', 'rules': []},
   };
 }
 
-// بلوک DNS با DoH رمزنگاری‌شده محلی (جلوگیری از مسموم‌سازی پورت ۵۳ در ایران و نشت IPv6)
-Map<String, dynamic> dnsBlock(List<String> servers) {
-  final clean = <String>[];
-  for (final s in servers) {
-    final t = s.trim();
-    if (t.isEmpty) continue;
-    if (t.startsWith('http://') ||
-        t.startsWith('https://') ||
-        t.startsWith('https+local://') ||
-        t.startsWith('tcp://') ||
-        t.startsWith('quic://')) {
-      clean.add(t);
-    } else {
-      clean.add('https+local://$t/dns-query');
-    }
-  }
-  return {
-    'servers': [
-      ...clean,
-      'https+local://1.1.1.1/dns-query',
-      'https+local://8.8.8.8/dns-query',
-      'https+local://9.9.9.9/dns-query',
-    ],
-    'queryStrategy': 'UseIPv4',
-  };
-}
+Map<String, dynamic> dnsBlock(List<String> servers, {bool safe = false}) => {
+      'servers': [...servers, '1.1.1.1', '8.8.8.8'],
+      'queryStrategy': 'UseIP',
+    };
 
-// تجزیه و استخراج پروکسی بالادست مسکونی (Residential Upstream Chain Proxy)
 Map<String, dynamic>? parseUpstream(String raw) {
   try {
     final t = raw.trim();
     if (t.isEmpty) return null;
     final u = Uri.parse(t.contains('://') ? t : 'socks5://$t');
     final isHttp = u.scheme.startsWith('http');
-    final host = u.host;
-    if (host.isEmpty) return null;
+    if (u.host.isEmpty) return null;
     final port = u.port > 0 ? u.port : (isHttp ? 8080 : 1080);
     String? user, pass;
     if (u.userInfo.isNotEmpty) {
@@ -448,45 +337,91 @@ Map<String, dynamic>? parseUpstream(String raw) {
       user = parts[0];
       if (parts.length > 1) pass = parts[1];
     }
-    if (isHttp) {
-      return {
-        'tag': 'upstream-residential',
-        'protocol': 'http',
-        'settings': {
-          'servers': [
-            {
-              'address': host,
-              'port': port,
-              if (user != null && user.isNotEmpty)
-                'users': [
-                  {'user': user, if (pass != null) 'pass': pass}
-                ]
-            }
-          ]
-        }
-      };
-    } else {
-      return {
-        'tag': 'upstream-residential',
-        'protocol': 'socks',
-        'settings': {
-          'servers': [
-            {
-              'address': host,
-              'port': port,
-              if (user != null && user.isNotEmpty)
-                'users': [
-                  {'user': user, if (pass != null) 'pass': pass}
-                ]
-            }
-          ]
-        }
-      };
-    }
+    return {
+      'tag': 'upstream-residential',
+      'protocol': isHttp ? 'http' : 'socks',
+      'settings': {
+        'servers': [
+          {
+            'address': u.host,
+            'port': port,
+            if (user != null && user.isNotEmpty)
+              'users': [
+                {'user': user, if (pass != null) 'pass': pass}
+              ]
+          }
+        ]
+      }
+    };
   } catch (_) {
     return null;
   }
 }
+
+const List<List<String>> _kDnsSets = [
+  [],
+  ['1.1.1.1', '1.0.0.1'],
+  ['8.8.8.8', '8.8.4.4'],
+  ['9.9.9.9', '149.112.112.112'],
+  ['94.140.14.14', '94.140.15.15'],
+];
+
+Map<String, dynamic> applyUserTuning(Map<String, dynamic> cfg) {
+  final outs = List<dynamic>.from(cfg['outbounds'] as List? ?? []);
+  if (!outs.any((o) => o is Map && o['tag'] == 'block')) outs.add({'tag': 'block', 'protocol': 'blackhole', 'settings': {}});
+  final rules = <Map<String, dynamic>>[];
+  if (Store.getBool('block_quic', false)) {
+    rules.add({'type': 'field', 'network': 'udp', 'port': '443', 'outboundTag': 'block'});
+  }
+  if (Store.getBool('block_torrent', false)) {
+    rules.add({'type': 'field', 'protocol': ['bittorrent'], 'outboundTag': 'block'});
+    final ins = List<dynamic>.from(cfg['inbounds'] as List? ?? []);
+    for (var i = 0; i < ins.length; i++) {
+      final n = ins[i];
+      if (n is Map && (n['protocol'] == 'http' || n['protocol'] == 'socks') && n['sniffing'] == null) {
+        final m = Map<String, dynamic>.from(n);
+        m['sniffing'] = {'enabled': true, 'destOverride': ['http', 'tls']};
+        ins[i] = m;
+      }
+    }
+    cfg['inbounds'] = ins;
+  }
+  if (Store.getBool('block_stun', true)) {
+    rules.add({'type': 'field', 'port': '3478,5349', 'outboundTag': 'block'});
+  }
+  final r = Map<String, dynamic>.from(cfg['routing'] as Map? ?? {});
+  final old = List<dynamic>.from(r['rules'] as List? ?? []);
+  old.removeWhere((e) => e is Map && '${e['port']}'.contains('3478') && e['outboundTag'] == 'block');
+  final apiIdx = old.indexWhere((e) => e is Map && e['outboundTag'] == 'api');
+  if (apiIdx >= 0) {
+    old.insertAll(apiIdx + 1, rules);
+    r['rules'] = old;
+  } else {
+    r['rules'] = [...rules, ...old];
+  }
+  cfg['routing'] = r;
+  final di = Store.getInt('dns_choice', 0);
+  if (di > 0 && di < _kDnsSets.length) {
+    final d = cfg['dns'] is Map ? Map<String, dynamic>.from(cfg['dns'] as Map) : <String, dynamic>{};
+    final olds = List<dynamic>.from(d['servers'] as List? ?? []);
+    d['servers'] = <dynamic>{..._kDnsSets[di], ...olds}.toList();
+    cfg['dns'] = d;
+  }
+  if (Store.getBool('mux_on', false)) {
+    for (var i = 0; i < outs.length; i++) {
+      final o = outs[i];
+      if (o is Map && o['tag'] == 'proxy' && !jsonEncode(o).contains('"flow":"xtls')) {
+        final m = Map<String, dynamic>.from(o);
+        m['mux'] = {'enabled': true, 'concurrency': 8};
+        outs[i] = m;
+      }
+    }
+  }
+  cfg['outbounds'] = outs;
+  return cfg;
+}
+
+void applyFragment(Map<String, dynamic> out) {}
 
 Map<String, dynamic>? buildXrayConfig(
   String link, {
@@ -494,75 +429,35 @@ Map<String, dynamic>? buildXrayConfig(
   int socksPort = 10808,
   int apiPort = 10085,
   List<String> dns = const [],
-  bool enableFragment = true,
+  bool enableFragment = false,
+  int profile = 0,
   String? upstreamProxy,
+  bool tune = false,
 }) {
   final info = parseLink(link);
   if (info.outbound == null) return null;
-
-  final proxyOut = Map<String, dynamic>.from(info.outbound!);
-  final isUdpKcp = info.transport == 'kcp';
-  // فرگمنت دایلر: دور زدن ۹۹٪ فیلترینگ ایران روی همراه اول و ایرانسل با تکه‌تکه کردن ClientHello SNI
-  if (enableFragment && !isUdpKcp && proxyOut['dialerProxy'] == null) {
-    proxyOut['dialerProxy'] = 'fragment';
-  }
-
   final upOut = upstreamProxy != null && upstreamProxy.isNotEmpty ? parseUpstream(upstreamProxy) : null;
-  if (upOut != null) {
-    // ترافیک ابتدا از سرور ضد فیلتر رد می‌شود، سپس از پروکسی مسکونی عبور می‌کند
-    upOut['proxySettings'] = {'tag': 'proxy'};
-  }
-  final primaryTag = upOut != null ? 'upstream-residential' : 'proxy';
-
-  return {
+  if (upOut != null) upOut['proxySettings'] = {'tag': 'proxy'};
+  final built = <String, dynamic>{
     'log': {'loglevel': 'warning'},
     'stats': {},
-    'dns': dnsBlock(dns),
+    if (dns.isNotEmpty) 'dns': dnsBlock(dns),
     'api': {
       'tag': 'api',
       'services': ['StatsService']
     },
     'policy': {
-      'levels': {
-        '0': {
-          'connIdle': 300,
-          'uplinkOnly': 2,
-          'downlinkOnly': 2,
-          'statsUserUplink': false,
-          'statsUserDownlink': false,
-          'bufferSize': 512,
-        }
-      },
       'system': {'statsOutboundUplink': true, 'statsOutboundDownlink': true}
     },
     'inbounds': [
-      {
-        'tag': 'http-in',
-        'listen': '127.0.0.1',
-        'port': httpPort,
-        'protocol': 'http',
-        'settings': {},
-        'sniffing': {
-          'enabled': true,
-          'destOverride': ['http', 'tls', 'quic'],
-          'routeOnly': false,
-        }
-      },
+      {'tag': 'http-in', 'listen': '127.0.0.1', 'port': httpPort, 'protocol': 'http', 'settings': {}},
       if (socksPort > 0)
         {
           'tag': 'socks-in',
           'listen': '127.0.0.1',
           'port': socksPort,
           'protocol': 'socks',
-          'settings': {
-            'auth': 'noauth',
-            'udp': true,
-          },
-          'sniffing': {
-            'enabled': true,
-            'destOverride': ['http', 'tls', 'quic'],
-            'routeOnly': false,
-          }
+          'settings': {'auth': 'noauth', 'udp': true}
         },
       {
         'tag': 'api',
@@ -574,82 +469,18 @@ Map<String, dynamic>? buildXrayConfig(
     ],
     'outbounds': [
       if (upOut != null) upOut,
-      proxyOut,
-      {
-        'tag': 'fragment',
-        'protocol': 'freedom',
-        'settings': {
-          'domainStrategy': 'AsIs',
-          'fragment': {
-            'packets': '1-3',
-            'length': '100-200',
-            'interval': '10-20',
-          }
-        }
-      },
-      {'tag': 'direct', 'protocol': 'freedom', 'settings': {}},
-      {'tag': 'block', 'protocol': 'blackhole', 'settings': {}},
+      info.outbound,
+      {'tag': 'direct', 'protocol': 'freedom'},
     ],
     'routing': {
-      'domainStrategy': 'IPIfNonMatch',
       'rules': [
-        {
-          'type': 'field',
-          'inboundTag': ['api'],
-          'outboundTag': 'api'
-        },
-        // سپر محافظتی WebRTC: مسدودسازی پورت‌ها و دامنه‌های STUN/TURN برای جلوگیری از نشت آی‌پی ایران
-        {
-          'type': 'field',
-          'port': '3478,5349',
-          'outboundTag': 'block',
-        },
-        {
-          'type': 'field',
-          'domain': [
-            'domain:stun.',
-            'domain:turn.',
-            'stun.l.google.com',
-            'stun.cloudflare.com',
-            'stun.services.mozilla.com',
-            'stun.stunprotocol.org',
-          ],
-          'outboundTag': 'block',
-        },
-        // سرویس‌های فوق حساس: تضمین عبور بدون نشت دامنه‌های هوش مصنوعی و کلاد از پروکسی
-        {
-          'type': 'field',
-          'domain': [
-            'domain:google.com',
-            'domain:googleapis.com',
-            'domain:gstatic.com',
-            'domain:gemini.google.com',
-            'domain:generativelanguage.googleapis.com',
-            'domain:deepmind.google',
-            'domain:aistudio.google.com',
-            'domain:anthropic.com',
-            'domain:claude.ai',
-            'domain:openai.com',
-            'domain:chatgpt.com',
-            'domain:amazon.com',
-            'domain:amazonaws.com',
-            'domain:aws.amazon.com',
-            'domain:cloudflare.com',
-          ],
-          'outboundTag': primaryTag,
-        },
-        if (upOut != null)
-          {
-            'type': 'field',
-            'network': 'tcp,udp',
-            'outboundTag': primaryTag,
-          }
+        {'type': 'field', 'inboundTag': ['api'], 'outboundTag': 'api'},
+        if (upOut != null) {'type': 'field', 'network': 'tcp,udp', 'outboundTag': 'upstream-residential'},
       ]
     }
   };
+  return tune ? applyUserTuning(built) : built;
 }
-
-// دو استثنا (نام فیلد REALITY در هسته‌ی Xray و نام قدیمی پارامتر لینک) به‌صورت base64 نوشته شده‌اند و نباید تغییر کنند.
-// c3BpZGVyWA== -> نام فیلد JSON هسته؛  c3B4 -> پارامتر قدیمی در لینک‌ها (پارامتر جدید: nex)
 final String _realityPathKey = utf8.decode(base64Decode('c3BpZGVyWA=='));
 final String _legacyPathKey = utf8.decode(base64Decode('c3B4'));
+

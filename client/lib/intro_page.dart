@@ -17,6 +17,7 @@ import 'store.dart';
 // ───────────────────────── ثبت هدف‌ها برای تور ─────────────────────────
 class Tour {
   static final Map<String, GlobalKey> _keys = {};
+  static Future<void> Function(IntroAnim anim, Buddy buddy)? launch;
 
   static GlobalKey keyOf(String id) => _keys.putIfAbsent(id, () => GlobalKey(debugLabel: 'tour-$id'));
 
@@ -38,7 +39,6 @@ class TourTarget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (!Store.firstRun) return child;
     return KeyedSubtree(key: Tour.keyOf(id), child: child);
   }
 }
@@ -74,6 +74,134 @@ const Map<String, Color> _kCatColors = {
   'B': Color(0xFFD81B6A),
 };
 
+const List<String> _kBunny = [
+  '..ooo......ooo..',
+  '.oprpo....oprpo.',
+  '.oprpo....oprpo.',
+  'oppppppppppppppo',
+  'oppppppppppppppo',
+  'opppeeppppeepppo',
+  'opppeeppppeepppo',
+  'orrppppyyppprrpo',
+  'oppppppmppmppppo',
+  '.oppppppppppppo.',
+  '..oooooooooooo..',
+  '...oppppppppo...',
+  '...ohhhhhhhho...',
+  '...oppppppppo...',
+  '...ooo....ooo...',
+];
+const List<String> _kSuper = [
+  '....oooooooo....',
+  '...okkkkkkkko...',
+  '..okkkkkkkkkko..',
+  'oppppppppppppppo',
+  'oppppppppppppppo',
+  'opppeeppppeepppo',
+  'opppeeppppeepppo',
+  'orrppppyyppprrpo',
+  'oppppppmppmppppo',
+  '.oppppppppppppo.',
+  'cc..oooooooo..cc',
+  'ccc.ohhhhhho.ccc',
+  'ccc.ohhSShho.ccc',
+  'ccc.ohhhhhho.ccc',
+  'cc..ooo..ooo..cc',
+];
+const List<String> _kBat = [
+  'k..............k',
+  'kk............kk',
+  'kkkkkkkkkkkkkkkk',
+  'kkkkkkkkkkkkkkkk',
+  'kkkkkkkkkkkkkkkk',
+  'kkkkeekkkkeekkkk',
+  'kkkkeekkkkeekkkk',
+  'kkkppppppppppkkk',
+  '.kkppppmmppppkk.',
+  '..kkppppppppkk..',
+  '.wwwwwwwwwwwwww.',
+  'wwwwwwwwwwwwwwww',
+  'wywwwwwwwwwwwwyw',
+  'wwwwwwwwwwwwwwww',
+  '.tttt......tttt.',
+];
+const Map<String, Color> _kBunnyColors = {
+  'o': Color(0xFF3B2A5A),
+  'p': Color(0xFFF4ECFF),
+  'r': Color(0xFFFFA6D5),
+  'h': Color(0xFFB58CFF),
+  'e': Color(0xFF2B1030),
+  'y': Color(0xFFFF7BC0),
+  'm': Color(0xFF8C3A78),
+  'f': Color(0xFFFFE066),
+  'g': Color(0xFFFF4FA3),
+};
+const Map<String, Color> _kSuperColors = {
+  'o': Color(0xFF1B1B3A),
+  'p': Color(0xFFFFD9B3),
+  'r': Color(0xFFFF9E9E),
+  'h': Color(0xFF1E5BFF),
+  'c': Color(0xFFE8142B),
+  'S': Color(0xFFFFE066),
+  'e': Color(0xFF14081F),
+  'y': Color(0xFFE0A878),
+  'm': Color(0xFF8C3A2E),
+  'k': Color(0xFF1A1A2E),
+  'f': Color(0xFFFFE066),
+};
+const Map<String, Color> _kBatColors = {
+  'k': Color(0xFF3A3A5C),
+  'p': Color(0xFFFFD9B3),
+  'e': Color(0xFFFFFFFF),
+  'm': Color(0xFF8C3A2E),
+  'w': Color(0xFFE9EEF5),
+  'y': Color(0xFFFFE066),
+  't': Color(0xFF2B2B35),
+  'f': Color(0xFFFFE066),
+};
+const Map<String, Color> _kCrownColors = {
+  'y': Color(0xFFFFE066),
+  'b': Color(0xFF38E8FF),
+  'r': Color(0xFFFF2D87),
+};
+const List<String> _kFlower = [
+  '.ff.',
+  'fggf',
+  '.ff.',
+];
+
+const List<String> _kStar = [
+  '.f.',
+  'fff',
+  '.f.',
+];
+
+const List<String> _kBatSign = [
+  'fkffkf',
+  '.fkkf.',
+];
+
+enum Buddy { mimi, leila, superman, batmobile }
+
+class _BuddyInfo {
+  final String name;
+  final String kind;
+  final List<String> rows;
+  final Map<String, Color> colors;
+  final List<String> acc;
+  final Map<String, Color> accColors;
+  final double ax;
+  final double ay;
+  const _BuddyInfo(this.name, this.kind, this.rows, this.colors, this.acc, this.accColors, this.ax, this.ay);
+}
+
+const Map<Buddy, _BuddyInfo> _kBuddies = {
+  Buddy.mimi: _BuddyInfo('میمی', 'دختر', _kCat, _kCatColors, _kCrown, _kCrownColors, 4.5, -3.6),
+  Buddy.leila: _BuddyInfo('لیلی', 'دختر', _kBunny, _kBunnyColors, _kFlower, _kBunnyColors, 6, 0),
+  Buddy.superman: _BuddyInfo('سوپرمن', 'پسر', _kSuper, _kSuperColors, _kStar, _kSuperColors, 6.5, -3.4),
+  Buddy.batmobile: _BuddyInfo('بتموبیل', 'پسر', _kBat, _kBatColors, _kBatSign, _kBatColors, 5, 11),
+};
+
 enum CatMood { idle, happy }
 
 class PixelCat extends StatelessWidget {
@@ -81,13 +209,14 @@ class PixelCat extends StatelessWidget {
   final bool blink;
   final CatMood mood;
   final double t;
-  const PixelCat({super.key, this.width = 180, this.blink = false, this.mood = CatMood.idle, this.t = 0});
+  final Buddy buddy;
+  const PixelCat({super.key, this.width = 180, this.blink = false, this.mood = CatMood.idle, this.t = 0, this.buddy = Buddy.mimi});
 
   @override
   Widget build(BuildContext context) {
     return CustomPaint(
       size: Size(width, width * _kCat.length / 16),
-      painter: _CatPainter(blink, mood, t),
+      painter: _CatPainter(blink, mood, t, buddy),
     );
   }
 }
@@ -103,7 +232,8 @@ class _CatPainter extends CustomPainter {
   final bool blink;
   final CatMood mood;
   final double t;
-  _CatPainter(this.blink, this.mood, this.t);
+  final Buddy buddy;
+  _CatPainter(this.blink, this.mood, this.t, this.buddy);
 
   void _plus(Canvas canvas, Paint p, double x, double y, double q) {
     canvas.drawRect(Rect.fromLTWH(x - q / 2, y - q / 2, q, q), p);
@@ -135,13 +265,14 @@ class _CatPainter extends CustomPainter {
       ..color = const Color(0xFF38E8FF).withOpacity(0.25 + 0.3 * pulse);
     canvas.drawOval(Rect.fromCenter(center: Offset(cx, size.height * 1.02), width: size.width * (0.9 + 0.15 * pulse), height: s * 2.2), ring);
 
+    final bi = _kBuddies[buddy]!;
     final paint = Paint()..isAntiAlias = false;
     var firstEye = -1;
-    for (var y = 0; y < _kCat.length; y++) {
-      if (firstEye < 0 && _kCat[y].contains('e')) firstEye = y;
+    for (var y = 0; y < bi.rows.length; y++) {
+      if (firstEye < 0 && bi.rows[y].contains('e')) firstEye = y;
     }
-    for (var y = 0; y < _kCat.length; y++) {
-      final row = _kCat[y];
+    for (var y = 0; y < bi.rows.length; y++) {
+      final row = bi.rows[y];
       for (var x = 0; x < row.length; x++) {
         var ch = row[x];
         if (ch == '.') continue;
@@ -149,7 +280,7 @@ class _CatPainter extends CustomPainter {
           if (blink && y == firstEye) ch = 'p';
           if (mood == CatMood.happy && y > firstEye) ch = 'p';
         }
-        paint.color = _kCatColors[ch] ?? Colors.transparent;
+        paint.color = bi.colors[ch] ?? Colors.transparent;
         canvas.drawRect(Rect.fromLTWH(x * s, y * s, s + 0.6, s + 0.6), paint);
       }
     }
@@ -176,16 +307,12 @@ class _CatPainter extends CustomPainter {
 
     final bob = math.sin(t * 2 * math.pi * 1) * s * 0.35;
     final cp = Paint()..isAntiAlias = false;
-    for (var y = 0; y < _kCrown.length; y++) {
-      for (var x = 0; x < _kCrown[y].length; x++) {
-        final ch = _kCrown[y][x];
+    for (var y = 0; y < bi.acc.length; y++) {
+      for (var x = 0; x < bi.acc[y].length; x++) {
+        final ch = bi.acc[y][x];
         if (ch == '.') continue;
-        cp.color = ch == 'y'
-            ? const Color(0xFFFFE066)
-            : ch == 'b'
-                ? const Color(0xFF38E8FF)
-                : const Color(0xFFFF2D87);
-        canvas.drawRect(Rect.fromLTWH((4.5 + x) * s, (y - 3.6) * s + bob, s + 0.6, s + 0.6), cp);
+        cp.color = bi.accColors[ch] ?? Colors.transparent;
+        canvas.drawRect(Rect.fromLTWH((bi.ax + x) * s, (y + bi.ay) * s + bob, s + 0.6, s + 0.6), cp);
       }
     }
 
@@ -204,7 +331,7 @@ class _CatPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _CatPainter old) => old.blink != blink || old.mood != mood || old.t != t;
+  bool shouldRepaint(covariant _CatPainter old) => old.blink != blink || old.mood != mood || old.t != t || old.buddy != buddy;
 }
 
 // ───────────────────────── افکت‌های پس‌زمینه‌ی تور ─────────────────────────
@@ -513,9 +640,8 @@ class _TourStep {
 const List<_TourStep> _kSteps = [
   _TourStep(null, 0, '', Icons.favorite_rounded, 'سلام! من میمی‌ام', 'راهنمای NEXORA VPN هستم. یه دور کامل خونه و Firefox رو باهم می‌چرخیم؛ دونه‌دونه و به ترتیب!', mood: CatMood.happy),
   // ── خانه ──
-  _TourStep('home.menu', 0, 'خانه', Icons.menu_rounded, 'منو', 'از این دکمه‌ی بالا سمت چپ وارد تنظیمات و بقیه‌ی بخش‌ها میشی.'),
+  _TourStep('home.menu', 0, 'خانه', Icons.person_rounded, 'پروفایل', 'از این دکمه‌ی بالا سمت راست، اسمت رو می‌بینی و وارد تنظیمات میشی.'),
   _TourStep('home.premium', 0, 'خانه', Icons.workspace_premium_rounded, 'پریمیوم', 'این تاج طلایی نسخه‌ی پریمیومه؛ به‌زودی میاد!', mood: CatMood.happy),
-  _TourStep('home.brand', 0, 'خانه', Icons.shield_rounded, 'لوگوی NEXORA', 'اینجا لوگوی NEXORA VPN‌ـه؛ خونه‌ی امن تو!'),
   _TourStep('home.status', 0, 'خانه', Icons.wifi_tethering_rounded, 'وضعیت اتصال', 'این برچسب میگه آماده‌ی اتصالی، در حال اتصالی یا وصل شدی. سبز یعنی امن و وصل!'),
   _TourStep('home.features', 0, 'خانه', Icons.lock_rounded, 'ویژگی‌ها', 'رمزنگاری امن، سرعت بالا و بدون محدودیت؛ سه قدرت اصلی NEXORA.', mood: CatMood.happy),
   _TourStep('home.server', 0, 'خانه', Icons.storage_rounded, 'کارت کانفیگ و سرور', 'روی این کارت بزن تا کانفیگ یا لوکیشن مورد علاقه‌ات رو عوض کنی. کانفیگ نداری؟ لمسش کن تا دریافت بشه.'),
@@ -541,21 +667,168 @@ const List<_TourStep> _kSteps = [
 ];
 
 /// [goTab] تب برنامه را عوض می‌کند (۰ = خانه ، ۳ = Firefox) تا تور بین دو بخش جابه‌جا شود.
-Future<void> showNexoraIntro(BuildContext context, {required void Function(int tab) goTab}) async {
+Future<void> showNexoraIntro(BuildContext context, {required void Function(int tab) goTab, IntroAnim anim = IntroAnim.warp, Buddy buddy = Buddy.mimi}) async {
   await Navigator.of(context).push(PageRouteBuilder<void>(
     opaque: false,
     transitionDuration: const Duration(milliseconds: 500),
     reverseTransitionDuration: const Duration(milliseconds: 400),
-    pageBuilder: (_, __, ___) => _IntroPage(goTab: goTab),
+    pageBuilder: (_, __, ___) => _IntroPage(goTab: goTab, anim: anim, buddy: buddy),
     transitionsBuilder: (_, a, __, child) => FadeTransition(opacity: a, child: child),
   ));
+}
+
+enum IntroAnim { warp, hearts, confetti, quick }
+
+class _AnimInfo {
+  final String title;
+  final String desc;
+  final IconData icon;
+  final Color top;
+  final Color bottom;
+  const _AnimInfo(this.title, this.desc, this.icon, this.top, this.bottom);
+}
+
+const Map<IntroAnim, _AnimInfo> _kAnimInfo = {
+  IntroAnim.warp: _AnimInfo('سفر ستاره‌ای', 'عبور از میان ستاره‌ها و انفجار قلب', Icons.auto_awesome_rounded, Color(0xFF14082F), Color(0xFF8E2A74)),
+  IntroAnim.hearts: _AnimInfo('بارش قلب', 'قلب‌ها و ستاره‌های شناور با میمی', Icons.favorite_rounded, Color(0xFF2A0B33), Color(0xFFD6307F)),
+  IntroAnim.confetti: _AnimInfo('جشن و کانفتی', 'رنگارنگ و شاد، مثل یک جشن', Icons.celebration_rounded, Color(0xFF0B1F4A), Color(0xFF7A3DD8)),
+  IntroAnim.quick: _AnimInfo('سریع و ساده', 'بدون انیمیشن ورود، مستقیم به راهنما', Icons.bolt_rounded, Color(0xFF1B1030), Color(0xFF4A2A7A)),
+};
+
+class IntroChoice {
+  final IntroAnim anim;
+  final Buddy buddy;
+  const IntroChoice(this.anim, this.buddy);
+}
+
+Future<IntroChoice?> showIntroPicker(BuildContext context, {bool first = false}) {
+  var buddy = Buddy.mimi;
+  return showModalBottomSheet<IntroChoice>(
+    context: context,
+    backgroundColor: Colors.transparent,
+    isScrollControlled: true,
+    isDismissible: !first,
+    enableDrag: !first,
+    builder: (ctx) => PopScope(
+      canPop: !first,
+      child: Directionality(
+      textDirection: TextDirection.rtl,
+      child: SafeArea(
+        child: StatefulBuilder(
+          builder: (ctx, setS) => SingleChildScrollView(
+            child: Container(
+              margin: const EdgeInsets.all(12),
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF1F8),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFF5A2250), width: 3),
+              ),
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('راهنما', style: TextStyle(color: Color(0xFF5A2250), fontSize: 20, fontWeight: FontWeight.w900)),
+                const SizedBox(height: 4),
+                Text(first ? 'خوش اومدی! راهنمات رو انتخاب کن تا آموزش شروع بشه.' : 'راهنمات رو انتخاب کن.', style: const TextStyle(color: Color(0xFF8C3A78), fontSize: 13, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 12),
+                Row(children: [
+                  for (final b in Buddy.values)
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () {
+                          HapticFeedback.selectionClick();
+                          setS(() => buddy = b);
+                        },
+                        child: Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 3),
+                          padding: const EdgeInsets.symmetric(vertical: 8),
+                          decoration: BoxDecoration(
+                            color: b == buddy ? const Color(0xFFFFE066) : Colors.white,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: const Color(0xFF5A2250), width: b == buddy ? 3 : 2),
+                          ),
+                          child: Column(mainAxisSize: MainAxisSize.min, children: [
+                            PixelCat(buddy: b, width: 54, mood: b == buddy ? CatMood.happy : CatMood.idle, t: 0),
+                            const SizedBox(height: 4),
+                            Text(_kBuddies[b]!.name, style: const TextStyle(color: Color(0xFF5A2250), fontSize: 13, fontWeight: FontWeight.w900)),
+                            Text(_kBuddies[b]!.kind, style: const TextStyle(color: Color(0xFF8C3A78), fontSize: 10.5, fontWeight: FontWeight.w700)),
+                          ]),
+                        ),
+                      ),
+                    ),
+                ]),
+                const SizedBox(height: 14),
+                _PickCard(
+                  info: const _AnimInfo('شروع راهنما', 'با همین راهنما قدم‌به‌قدم برنامه را یاد بگیر', Icons.play_arrow_rounded, Color(0xFF1B1030), Color(0xFF4A2A7A)),
+                  onTap: () => Navigator.of(ctx).pop(IntroChoice(IntroAnim.quick, buddy)),
+                ),
+                if (first)
+                  Center(
+                    child: TextButton(
+                      onPressed: () => Navigator.of(ctx).pop(),
+                      child: const Text('بعداً', style: TextStyle(color: Color(0xFF8C3A78), fontWeight: FontWeight.w800)),
+                    ),
+                  ),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    ),
+    ),
+  );
+}
+
+class _PickCard extends StatelessWidget {
+  final _AnimInfo info;
+  final VoidCallback onTap;
+  const _PickCard({required this.info, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: GestureDetector(
+        onTap: () {
+          HapticFeedback.selectionClick();
+          onTap();
+        },
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [info.top, info.bottom]),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFF5A2250), width: 3),
+            boxShadow: const [BoxShadow(color: Color(0xFF5A2250), offset: Offset(4, 4))],
+          ),
+          child: Row(children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(color: const Color(0xFFFF5FAE), borderRadius: BorderRadius.circular(6), border: Border.all(color: const Color(0xFF5A2250), width: 2)),
+              child: Icon(info.icon, color: Colors.white, size: 24),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                Text(info.title, style: const TextStyle(color: Colors.white, fontSize: 15.5, fontWeight: FontWeight.w900)),
+                const SizedBox(height: 2),
+                Text(info.desc, style: const TextStyle(color: Color(0xFFFFD6EC), fontSize: 12, fontWeight: FontWeight.w600)),
+              ]),
+            ),
+            const Icon(Icons.chevron_left_rounded, color: Colors.white, size: 26),
+          ]),
+        ),
+      ),
+    );
+  }
 }
 
 enum _Ph { cinema, tour }
 
 class _IntroPage extends StatefulWidget {
   final void Function(int tab) goTab;
-  const _IntroPage({required this.goTab});
+  final IntroAnim anim;
+  final Buddy buddy;
+  const _IntroPage({required this.goTab, this.anim = IntroAnim.warp, this.buddy = Buddy.mimi});
 
   @override
   State<_IntroPage> createState() => _IntroPageState();
@@ -576,6 +849,10 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
   late final List<_Warp> _warp;
   late final List<_Burst> _burst;
   late final List<_Conf> _conf;
+
+  late final List<_TourStep> _steps = _kSteps
+      .map((t) => _TourStep(t.target, t.tab, t.badge, t.icon, t.title.replaceAll('میمی', _kBuddies[widget.buddy]!.name), t.text.replaceAll('میمی', _kBuddies[widget.buddy]!.name), mood: t.mood, finale: t.finale))
+      .toList();
 
   _Ph _ph = _Ph.cinema;
   bool _cinemaOn = true;
@@ -621,7 +898,12 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
         HapticFeedback.mediumImpact();
       }
     });
-    _cinema.forward().then((_) => _beginTour());
+    if (widget.anim == IntroAnim.quick) {
+      _cinemaOn = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _beginTour());
+    } else {
+      _cinema.forward().then((_) => _beginTour());
+    }
 
     _blinkT = Timer.periodic(const Duration(milliseconds: 2600), (_) {
       if (!mounted) return;
@@ -677,12 +959,12 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
 
   Future<void> _go(int i, {int dir = 1}) async {
     if (!mounted || _busy || _closing) return;
-    if (i >= _kSteps.length) return _finish();
+    if (i >= _steps.length) return _finish();
     if (i < 0) i = 0;
     _busy = true;
     _autoT?.cancel();
     _remeasureT?.cancel();
-    final st = _kSteps[i];
+    final st = _steps[i];
     var typedAlready = false;
     if (st.tab != _tab) {
       // کارت بدون سوراخ نشان داده می‌شود تا صفحه‌ی بعدی بالا بیاید
@@ -745,11 +1027,11 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
 
   void _armAuto() {
     _autoT?.cancel();
-    if (!mounted || _closing || _ph != _Ph.tour || _i >= _kSteps.length - 1) return;
-    final ms = 7000 + _kSteps[_i].text.length * 24;
+    if (!mounted || _closing || _ph != _Ph.tour || _i >= _steps.length - 1) return;
+    final ms = _steps[_i].text.length > 90 ? 7000 : 5000;
     _autoT = Timer(Duration(milliseconds: ms), () {
       if (!mounted || _closing || _busy) return;
-      if (_i >= _kSteps.length - 1) return;
+      if (_i >= _steps.length - 1) return;
       _go(_i + 1);
     });
   }
@@ -757,7 +1039,7 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
   void _startTyping() {
     _typeT?.cancel();
     _typed = 0;
-    final total = _kSteps[_i].text.length;
+    final total = _steps[_i].text.length;
     _typeT = Timer.periodic(const Duration(milliseconds: 24), (t) {
       if (!mounted || _typed >= total) {
         t.cancel();
@@ -768,7 +1050,7 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
   }
 
   void _revealText() {
-    final total = _kSteps[_i].text.length;
+    final total = _steps[_i].text.length;
     if (_typed < total) {
       _typeT?.cancel();
       setState(() => _typed = total);
@@ -778,9 +1060,9 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
   void _next() {
     if (_busy) return;
     HapticFeedback.selectionClick();
-    final total = _kSteps[_i].text.length;
+    final total = _steps[_i].text.length;
     if (_typed < total) return _revealText();
-    if (_i >= _kSteps.length - 1) return _finish();
+    if (_i >= _steps.length - 1) return _finish();
     _go(_i + 1);
   }
 
@@ -854,8 +1136,9 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
           animation: Listenable.merge([_cinema, _loop]),
           builder: (_, __) {
             final t = _cinema.value;
-            final top = Color.lerp(const Color(0xFF05020F), const Color(0xFF14082F), (t * 2).clamp(0.0, 1.0))!;
-            final bot = Color.lerp(const Color(0xFF14082F), const Color(0xFF8E2A74), (t * 1.4).clamp(0.0, 1.0))!;
+            final info = _kAnimInfo[widget.anim]!;
+            final top = Color.lerp(const Color(0xFF05020F), info.top, (t * 2).clamp(0.0, 1.0))!;
+            final bot = Color.lerp(info.top, info.bottom, (t * 1.4).clamp(0.0, 1.0))!;
             final drop = Curves.bounceOut.transform(const Interval(0.12, 0.45).transform(t));
             final bob = t > 0.45 ? math.sin(_loop.value * 2 * math.pi * 8) * 6 : 0.0;
             final catY = (1 - drop) * -size.height * 0.7 + bob;
@@ -867,7 +1150,15 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
                   ),
                 ),
               ),
-              Positioned.fill(child: CustomPaint(painter: _CinemaPainter(t, _warp, _burst))),
+              Positioned.fill(
+                child: CustomPaint(
+                  painter: widget.anim == IntroAnim.hearts
+                      ? _FxPainter(_loop.value, _stars, _hearts)
+                      : widget.anim == IntroAnim.confetti
+                          ? _ConfettiPainter(_loop.value, _conf)
+                          : _CinemaPainter(t, _warp, _burst),
+                ),
+              ),
               Positioned(
                 top: size.height * 0.17,
                 left: 0,
@@ -881,7 +1172,7 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
                 child: Center(
                   child: Transform.translate(
                     offset: Offset(0, catY),
-                    child: PixelCat(width: math.min(size.width * 0.5, 210), blink: _blink, mood: t > 0.5 ? CatMood.happy : CatMood.idle, t: _loop.value * 8),
+                    child: PixelCat(buddy: widget.buddy, width: math.min(size.width * 0.5, 210), blink: _blink, mood: t > 0.5 ? CatMood.happy : CatMood.idle, t: _loop.value * 8),
                   ),
                 ),
               ),
@@ -932,7 +1223,7 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
                   decoration: BoxDecoration(color: _ink, borderRadius: BorderRadius.circular(4)),
                   child: Text(st.badge, style: const TextStyle(color: Color(0xFFFFE066), fontSize: 10.5, fontWeight: FontWeight.w900)),
                 ),
-              Text('${_i + 1}/${_kSteps.length}', style: const TextStyle(color: Color(0xFF8C3A78), fontWeight: FontWeight.w800, fontSize: 12)),
+              Text('${_i + 1}/${_steps.length}', style: const TextStyle(color: Color(0xFF8C3A78), fontWeight: FontWeight.w800, fontSize: 12)),
             ]),
             const SizedBox(height: 8),
             RichText(
@@ -958,7 +1249,7 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
           offset: Offset(0, bob + (1 - e) * 120),
           child: Transform.rotate(
             angle: tilt,
-            child: Transform.scale(scale: 0.4 + 0.6 * e, child: PixelCat(width: big ? 190 : 96, blink: _blink, mood: st.mood, t: _loop.value * 8)),
+            child: Transform.scale(scale: 0.4 + 0.6 * e, child: PixelCat(buddy: widget.buddy, width: big ? 190 : 96, blink: _blink, mood: st.mood, t: _loop.value * 8)),
           ),
         );
       },
@@ -979,7 +1270,7 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
         child: Align(
           alignment: AlignmentDirectional.centerStart,
           child: FractionallySizedBox(
-            widthFactor: (_i + 1) / _kSteps.length,
+            widthFactor: (_i + 1) / _steps.length,
             child: Container(decoration: BoxDecoration(color: _pink, borderRadius: BorderRadius.circular(1))),
           ),
         ),
@@ -993,7 +1284,7 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
   }
 
   Widget _panel(_TourStep st, bool big, bool atBottom) {
-    final last = _i == _kSteps.length - 1;
+    final last = _i == _steps.length - 1;
     final Widget body;
     if (big) {
       body = Column(mainAxisSize: MainAxisSize.min, children: [
@@ -1033,7 +1324,7 @@ class _IntroPageState extends State<_IntroPage> with TickerProviderStateMixin {
   }
 
   Widget _tourLayer(Size size) {
-    final st = _kSteps[_i];
+    final st = _steps[_i];
     final big = st.target == null;
     final atBottom = _to == null ? true : _to!.center.dy < size.height * 0.56;
     return Stack(children: [

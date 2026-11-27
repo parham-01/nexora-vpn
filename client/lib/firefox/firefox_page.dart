@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../api.dart';
 import '../aws_assistant.dart';
 import '../traffic_card.dart';
 import '../vpn_service.dart';
@@ -42,12 +43,18 @@ class _FirefoxPageState extends State<FirefoxPage> {
     super.dispose();
   }
 
+  /// خطای فنی فقط در لاگ ادمین ثبت می‌شود؛ کاربر پیام ساده می‌بیند.
+  void _fail(String area, Object e) {
+    unawaited(Api.logError(area, 'firefox_error', detail: _clean(e)));
+    if (mounted) _message('مشکلی پیش آمد؛ دوباره تلاش کن');
+  }
+
   Future<void> _selectAccount(Account account) async {
     try {
       await _service.selectAccount(account.id);
       if (mounted) _message('اکانت انتخاب شد');
     } catch (e) {
-      if (mounted) _message(_clean(e));
+      _fail('Firefox / انتخاب اکانت', e);
     }
   }
 
@@ -90,7 +97,7 @@ class _FirefoxPageState extends State<FirefoxPage> {
     try {
       await _service.refresh();
     } catch (e) {
-      if (mounted) _message(_clean(e));
+      _fail('Firefox / به‌روزرسانی', e);
     }
   }
 
@@ -120,7 +127,7 @@ class _FirefoxPageState extends State<FirefoxPage> {
       await _service.removeAccount(account.id);
       if (mounted) _message('اکانت حذف شد');
     } catch (e) {
-      if (mounted) _message(_clean(e));
+      _fail('Firefox / حذف اکانت', e);
     }
   }
 
@@ -181,11 +188,12 @@ class _FirefoxPageState extends State<FirefoxPage> {
         // فقط پینگ همین لوکیشن انتخاب‌شده (پروکسی روشن است؛ چند صد میلی‌ثانیه)
         unawaited(_service.pingLocation(location.code).catchError((Object _) => 0));
       } else {
+        unawaited(Api.logError('Firefox / اتصال', 'firefox_unverified', detail: 'پروکسی Firefox بالا آمد ولی تأیید واقعی اینترنت انجام نشد'));
         _message('اتصال تأیید نشد؛ دوباره تلاش کن');
         await _service.disconnect();
       }
     } catch (e) {
-      if (mounted) _message(_clean(e));
+      _fail('Firefox / اتصال', e);
     } finally {
       if (mounted) setState(() => _connectingCode = null);
     }
@@ -196,7 +204,7 @@ class _FirefoxPageState extends State<FirefoxPage> {
       await _service.disconnect();
       if (mounted) _message('Firefox قطع شد');
     } catch (e) {
-      if (mounted) _message(_clean(e));
+      _fail('Firefox / قطع اتصال', e);
     }
   }
 
@@ -223,7 +231,7 @@ class _FirefoxPageState extends State<FirefoxPage> {
       if (!mounted || ms < 0) return;
       _message(ms > 0 ? 'پینگ $name: $ms ms' : 'پینگ $name جواب نداد (Timeout)');
     } catch (e) {
-      if (mounted) _message(_clean(e));
+      _fail('Firefox / پینگ لوکیشن', e);
     }
   }
 
@@ -238,7 +246,7 @@ class _FirefoxPageState extends State<FirefoxPage> {
       if (!mounted || n < 0) return;
       _message(n > 0 ? 'پینگ $n لوکیشن گرفته شد' : 'هیچ لوکیشنی جواب نداد (Timeout)');
     } catch (e) {
-      if (mounted) _message(_clean(e));
+      _fail('Firefox / پینگ همه‌ی لوکیشن‌ها', e);
     }
   }
 
