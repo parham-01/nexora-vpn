@@ -1,50 +1,68 @@
-# Nexora VPN
+<div align="center">
 
-Open-source VPN client (Flutter) for Android, Windows, Linux and macOS. No backend, no database, no admin app: everything stays on your device.
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:2f8cff,100:00c2ff&height=220&section=header&text=NEXORA%20VPN&fontSize=58&fontColor=ffffff&fontAlignY=38&desc=VPN%20for%20Firefox&descSize=22&descAlignY=60" width="100%" alt="NEXORA VPN">
 
-> Not affiliated with Mozilla. "Firefox" and "Mozilla" are trademarks of the Mozilla Foundation and are used only to describe compatibility.
+<img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=22&duration=3500&pause=900&color=2F8CFF&center=true&vCenter=true&width=640&lines=VPN%20for%20Firefox;Android%20%7C%20macOS%20%7C%20Linux%20%7C%20Windows;Fast%20%E2%80%A2%20Private%20%E2%80%A2%20Simple" alt="typing">
 
-## Features
-- Connect with V2Ray/Xray and sing-box configs (VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, WireGuard)
-- Add, edit and delete your own servers; sequential real ping test with live per-server spinner
-- Animated connection globe and home screen, live traffic card
-- Firefox VPN page with multiple accounts and per-country locations
-- Advanced settings: DNS choice, QUIC/torrent/WebRTC blocking, Mux, auto-disconnect, usage alerts
-- In-app updater using GitHub Releases (picks the right file for your CPU)
-- Cloudflare Worker relay option
+# 🛡️ 𝗡𝗘𝗫𝗢𝗥𝗔 𝗩𝗣𝗡
 
-## Structure
-| Folder | Purpose |
-|---|---|
-| `client/` | The app |
-| `tools/` | Build helpers |
-| `.github/workflows/build.yml` | Build all platforms and publish a Release |
+### 🦊 𝗩𝗣𝗡 𝗳𝗼𝗿 𝗙𝗶𝗿𝗲𝗳𝗼𝘅
 
-## Build
-1. Fork this repo. Go to Actions, run **build** and pick the platforms.
-2. Install the result and add your own server links inside the app.
+<img src="https://img.shields.io/badge/Android-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android">
 
-## Signing (Android)
-Add repository secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`.
-Without them a temporary key is used and users cannot update over an older install. Never commit a keystore.
-
-## Updater
-Set the repository in `client/lib/updater.dart` (`kUpdateRepo`). The app reads the latest Release, compares it with the installed version and downloads the file for the device architecture.
-
-## Privacy
-The app has no analytics and no server of its own. Besides your VPN traffic it only contacts GitHub (update check) and public IP lookup services.
-
-## Security
-See [SECURITY.md](SECURITY.md).
-
-## License
-GPL-3.0, see [LICENSE](LICENSE). The core in `client/third_party/nexora-core` and part of `client/lib/firefox` are GPL-3.0, so the whole app is distributed under GPL-3.0. Source must stay available when you distribute builds.
+</div>
 
 ---
 
-## فارسی
-کلاینت VPN متن‌باز برای اندروید، ویندوز، لینوکس و مک. بدون سرور، بدون دیتابیس و بدون اپ ادمین؛ همه‌چیز فقط روی دستگاه خودت می‌ماند.
-1. ریپو را Fork کن و در Actions ورک‌فلو **build** را اجرا کن.
-2. برنامه را نصب کن و لینک سرورهای خودت را داخل برنامه اضافه کن.
-3. برای آپدیت روی نسخه‌ی قبلی، سه secret امضای اندروید را تنظیم کن و keystore را هرگز commit نکن.
-4. آدرس ریپوی آپدیت را در `client/lib/updater.dart` (`kUpdateRepo`) بگذار.
+<div dir="rtl">
+
+## ✨ این برنامه چیست؟
+
+**NEXORA VPN** یک VPN برای **فایرفاکس** است. با یک لمس وصل می‌شوید و اینترنت‌تان امن، خصوصی و سریع می‌شود؛ بدون تنظیمات پیچیده و بدون دردسر.
+
+## 🚀 چه کارهایی می‌کند؟
+
+- 🔒 اتصال امن و خصوصی با یک دکمه
+- 🦊 ساخته‌شده برای فایرفاکس و هماهنگ با آن
+- 🌐 تونل کامل روی اندروید و ویندوز
+- 🧭 پروکسی سیستم یا «فقط پروکسی» روی لینوکس و مک
+- ☁️ رله‌ی کلادفلر برای اتصال پایدارتر
+- 🛰️ تنظیم DNS داخل خود برنامه
+- 🛡️ پشتیبانی از ECH برای حریم خصوصی بیشتر
+- 💾 بکاپ و بازیابی تنظیمات
+- 🎨 رابط ساده، شیک و سبک
+- 📱🖥️ یک برنامه برای همه‌ی دستگاه‌ها
+
+> داخل برنامه، بخش **گزینه‌ها** (آیکون تنظیمات صفحه‌ی Firefox) همه‌ی این امکانات را در اختیارتان می‌گذارد.
+
+## 📱 پلتفرم‌ها
+
+| پلتفرم | توضیح |
+| :-- | :-- |
+| 📱 **Android** | فایل APK را نصب کنید — اتصال به‌صورت تونل کامل |
+
+## 📥 دانلود
+
+**از بخش Releases همین صفحه، فایل مورد نظر خود را دانلود کنید.**
+
+</div>
+
+<div align="center">
+
+<a href="https://github.com/parham-01/nexora-vpn/releases/latest"><img src="https://img.shields.io/badge/Download-Releases-2f8cff?style=for-the-badge&logo=github&logoColor=white" alt="Download"></a>
+
+</div>
+
+---
+
+<div align="center">
+
+### 📢 Join our Telegram Channel
+
+<a href="https://t.me/parham_ste01"><img src="https://img.shields.io/badge/Telegram-%40parham__ste01-26A5E4?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram"></a>
+
+📢 **Telegram Channel:** [t.me/parham_ste01](https://t.me/parham_ste01)
+
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:00c2ff,100:2f8cff&height=120&section=footer" width="100%" alt="footer">
+
+</div>
